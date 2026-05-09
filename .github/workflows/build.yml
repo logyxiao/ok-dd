@@ -1,0 +1,25 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  pyappify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt --upgrade
+
+      - name: Build with pyappify
+        uses: ok-oldking/pyappify-action@master
+        with:
+          build_exe_only: false

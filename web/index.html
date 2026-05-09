@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OK-DingTalk</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-icon">OK</div>
+          <div>
+            <div class="brand-title">OK-DingTalk</div>
+            <div class="brand-meta">v0.1.0</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <div class="nav-section">概览</div>
+          <button class="nav-item active" data-tab="dashboard"><span>▦</span> 仪表盘</button>
+          <button class="nav-item" data-tab="run"><span>▶</span> 执行控制</button>
+          <button class="nav-item" data-tab="schedule"><span>◷</span> 自动计划</button>
+          <button class="nav-item" data-tab="logs"><span>≡</span> 操作日志</button>
+          <div class="nav-section">工具</div>
+          <button class="nav-item" id="openLogs"><span>□</span> 日志目录</button>
+          <button class="nav-item" id="openShots"><span>◫</span> 截图目录</button>
+          <button class="nav-item" id="shutdownPanel"><span>⏻</span> 退出面板</button>
+        </nav>
+
+        <div class="profile">
+          <div class="avatar">钉</div>
+          <div>
+            <div class="profile-name">钉钉打卡</div>
+            <div class="profile-status" id="sidebarStatus">读取中</div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">用量仪表盘</h1>
+            <p id="pageSubtitle">查看打卡状态、计划任务和最近执行记录</p>
+          </div>
+          <div class="top-actions">
+            <button class="ghost" id="refreshBtn">刷新</button>
+            <button class="primary" id="quickRunBtn">立即执行</button>
+          </div>
+        </header>
+
+        <section class="tab-page active" id="dashboard">
+          <div class="cards-grid">
+            <article class="metric-card accent-green">
+              <div class="metric-label">今日完成</div>
+              <div class="metric-value" id="todayDone">--</div>
+              <div class="metric-note" id="lastCompleted">上次完成：--</div>
+            </article>
+            <article class="metric-card accent-blue">
+              <div class="metric-label">工作日判断</div>
+              <div class="metric-value" id="workdayWillRun">--</div>
+              <div class="metric-note" id="workdayDesc">--</div>
+            </article>
+            <article class="metric-card accent-purple">
+              <div class="metric-label">下次自动打卡</div>
+              <div class="metric-value" id="nextRun">--</div>
+              <div class="metric-note" id="taskInstalled">自动计划：--</div>
+            </article>
+            <article class="metric-card accent-orange">
+              <div class="metric-label">最近状态</div>
+              <div class="metric-value" id="lastStatus">--</div>
+              <div class="metric-note" id="lastMessage">--</div>
+            </article>
+          </div>
+
+          <div class="dashboard-grid">
+            <section class="panel large">
+              <div class="panel-head">
+                <h2>执行输出</h2>
+                <div class="legend"><span class="dot green"></span> 实时</div>
+              </div>
+              <pre class="console" id="dashboardOutput">暂无输出</pre>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>快速操作</h2>
+              </div>
+              <div class="quick-list">
+                <button class="primary wide" id="dashRun">立即执行下班打卡</button>
+                <button class="secondary wide" id="dashDry">检查今天是否会执行</button>
+                <button class="ghost wide" data-open="logs">打开日志目录</button>
+                <button class="ghost wide" data-open="screenshots">打开截图目录</button>
+              </div>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>最近记录</h2>
+              <span id="logCount">0</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>时间</th><th>状态</th><th>事件</th><th>消息</th></tr>
+                </thead>
+                <tbody id="recentLogRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-page" id="run">
+          <section class="panel form-panel">
+            <div class="panel-head">
+              <h2>执行控制</h2>
+              <span id="runState">空闲</span>
+            </div>
+            <div class="form-grid">
+              <label class="check-row"><input type="checkbox" id="runKeepScrcpy" /> 保留脚本新开的 scrcpy</label>
+            </div>
+            <div class="button-row">
+              <button class="primary" id="runNow">立即执行</button>
+              <button class="secondary" id="dryRun">只检查今天</button>
+              <button class="danger" id="stopRun">停止当前执行</button>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>实时输出</h2></div>
+            <pre class="console tall" id="runOutput">暂无输出</pre>
+          </section>
+        </section>
+
+        <section class="tab-page" id="schedule">
+          <section class="panel form-panel">
+            <div class="panel-head">
+              <h2>自动计划</h2>
+              <span id="scheduleStatus">读取中</span>
+            </div>
+            <div class="schedule-row">
+              <label>
+                <span>每天执行时间</span>
+                <input id="scheduleTime" value="18:05" />
+              </label>
+              <label class="check-row"><input type="checkbox" id="scheduleWorkdayOnly" checked /> 仅中国工作日执行</label>
+            </div>
+            <div class="button-row">
+              <button class="primary" id="installTask">安装 / 更新自动执行</button>
+              <button class="secondary" id="pauseTask">暂停计划</button>
+              <button class="secondary" id="resumeTask">恢复计划</button>
+              <button class="ghost" id="runFromSchedule">立即执行</button>
+              <button class="danger" id="deleteTask">删除自动执行</button>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>计划任务详情</h2></div>
+            <div class="detail-grid">
+              <div><span>安装状态</span><strong id="detailInstalled">--</strong></div>
+              <div><span>启用状态</span><strong id="detailEnabled">--</strong></div>
+              <div><span>下次运行</span><strong id="detailNext">--</strong></div>
+              <div><span>上次运行</span><strong id="detailLast">--</strong></div>
+              <div><span>上次结果</span><strong id="detailResult">--</strong></div>
+              <div><span>当前执行</span><strong id="detailRunning">--</strong></div>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-page" id="logs">
+          <section class="panel fill">
+            <div class="panel-head">
+              <h2>操作日志</h2>
+              <button class="ghost" id="refreshLogs">刷新日志</button>
+            </div>
+            <div class="table-wrap tall-table">
+              <table>
+                <thead>
+                  <tr><th>时间</th><th>状态</th><th>事件</th><th>消息</th></tr>
+                </thead>
+                <tbody id="allLogRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

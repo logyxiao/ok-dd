@@ -1,0 +1,5 @@
+ok-script==1.0.1
+opencv-python>=4.9.0.80
+numpy>=1.26.4
+pywin32>=306
+pyinstaller>=6.11.0

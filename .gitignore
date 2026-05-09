@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+configs/
+logs/
+screenshots/
+build/
+dist/
+release/
+*.spec
+.bytro
+python
