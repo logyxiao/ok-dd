@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from src.adb import launch_package
+from src.adb import force_stop_package, launch_package, lock_screen
 from src.run_state import append_action, mark_completed
 from src.scrcpy import click_scrcpy_relative, close_window, ensure_any_scrcpy_window
 
@@ -40,6 +40,24 @@ def run_offwork_sequence(
         if progress:
             progress(message)
 
+    def finish_device() -> None:
+        try:
+            emit("关闭钉钉")
+            force_stop_package(package)
+            append_action("下班打卡序列", "成功", "已关闭钉钉")
+        except Exception as exception:
+            message = f"关闭钉钉失败：{exception}"
+            emit(message)
+            append_action("下班打卡序列", "失败", message)
+        try:
+            emit("锁定手机屏幕")
+            lock_screen()
+            append_action("下班打卡序列", "成功", "已锁定手机屏幕")
+        except Exception as exception:
+            message = f"锁定手机屏幕失败：{exception}"
+            emit(message)
+            append_action("下班打卡序列", "失败", message)
+
     if open_dingtalk:
         emit("打开钉钉")
         launch_package(package, wait_seconds=launch_wait, fresh=fresh)
@@ -66,4 +84,5 @@ def run_offwork_sequence(
             close_window(hwnd)
             emit("已关闭本次脚本启动的 scrcpy 窗口")
 
+    finish_device()
     mark_completed("下班打卡序列已完成")

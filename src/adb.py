@@ -5,17 +5,34 @@ import time
 
 
 def run_adb(args: list[str], timeout: float = 30) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["adb", *args],
-        check=True,
+    command = ["adb", *args]
+    result = subprocess.run(
+        command,
         text=True,
         capture_output=True,
         timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
     )
+    if result.returncode != 0:
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        details = [f"ADB 命令执行失败：{subprocess.list2cmdline(command)}", f"退出码：{result.returncode}"]
+        if stdout:
+            details.append(f"标准输出：{stdout}")
+        if stderr:
+            details.append(f"错误输出：{stderr}")
+        details.append("请确认手机已连接、已开启 USB 调试，并在手机上允许当前电脑调试。")
+        raise RuntimeError("\n".join(details))
+    return result
 
 
 def force_stop_package(package_name: str) -> None:
     run_adb(["shell", "am", "force-stop", package_name], timeout=10)
+
+
+def lock_screen() -> None:
+    send_keyevent(223)
 
 
 def launch_package(package_name: str, wait_seconds: float = 3, fresh: bool = False) -> None:

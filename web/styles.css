@@ -142,6 +142,8 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 h2 { margin: 0; font-size: 16px; }
 .legend, .panel-head span { color: var(--muted); font-size: 12px; }
+.head-actions { display: flex; align-items: center; gap: 10px; }
+.small { padding: 7px 10px; font-size: 12px; border-radius: 8px; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .dot.green { background: var(--green); }
 

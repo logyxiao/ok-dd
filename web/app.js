@@ -28,6 +28,28 @@ function setDisabled(id, disabled) {
   if (el) el.disabled = Boolean(disabled);
 }
 
+async function copyOutput(targetId) {
+  const text = $(targetId)?.textContent || "";
+  if (!text || text === "暂无输出") {
+    toast("暂无可复制的输出");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("输出已复制");
+  } catch (_error) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+    toast("输出已复制");
+  }
+}
+
 function statusClass(status) {
   return `status-pill status-${statusKey(status)}`;
 }
@@ -235,6 +257,7 @@ async function openFolder(target) {
 function bind() {
   document.querySelectorAll(".nav-item[data-tab]").forEach((el) => el.addEventListener("click", () => switchTab(el.dataset.tab)));
   document.querySelectorAll("[data-open]").forEach((el) => el.addEventListener("click", () => openFolder(el.dataset.open)));
+  document.querySelectorAll("[data-copy-output]").forEach((el) => el.addEventListener("click", () => copyOutput(el.dataset.copyOutput)));
   $("openLogs").addEventListener("click", () => openFolder("logs"));
   $("openShots").addEventListener("click", () => openFolder("screenshots"));
   $("shutdownPanel").addEventListener("click", shutdownPanel);

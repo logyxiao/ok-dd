@@ -78,7 +78,10 @@
             <section class="panel large">
               <div class="panel-head">
                 <h2>执行输出</h2>
-                <div class="legend"><span class="dot green"></span> 实时</div>
+                <div class="head-actions">
+                  <button class="ghost small" data-copy-output="dashboardOutput">复制输出</button>
+                  <div class="legend"><span class="dot green"></span> 实时</div>
+                </div>
               </div>
               <pre class="console" id="dashboardOutput">暂无输出</pre>
             </section>
@@ -127,7 +130,10 @@
             </div>
           </section>
           <section class="panel">
-            <div class="panel-head"><h2>实时输出</h2></div>
+            <div class="panel-head">
+              <h2>实时输出</h2>
+              <button class="ghost small" data-copy-output="runOutput">复制输出</button>
+            </div>
             <pre class="console tall" id="runOutput">暂无输出</pre>
           </section>
         </section>
