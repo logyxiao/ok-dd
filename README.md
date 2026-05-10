@@ -165,7 +165,7 @@ GUI 支持：
 4. 查看 Windows 计划任务的下次自动执行时间、上次运行时间和结果。
 5. 点击“立即执行”手动运行下班打卡脚本。
 6. 点击“只检查今天”进行 dry-run。
-7. 设置自动执行时间，并安装/更新计划任务。
+7. 设置早上和晚上两个自动执行时间，并安装/更新计划任务。
 8. 删除自动执行计划任务。
 9. 打开日志目录和截图目录。
 10. 查看最近执行日志和实时命令输出。
@@ -176,6 +176,37 @@ GUI 支持：
 ```text
 logs\dingtalk_state.json
 logs\dingtalk_actions.jsonl
+```
+
+## 识别截图后点击
+
+纯坐标点击可能在页面没加载完时提前点击。项目现在支持 OpenCV 模板识别：先等待按钮/入口图片出现在 scrcpy 画面里，再点击模板中心。
+
+详细说明：
+
+[docs/template_matching.md](</C:/Users/to/Documents/New project 3/docs/template_matching.md>)
+
+主流程默认启用模板识别。如果模板不存在，会自动回退到原来的坐标点击。
+
+默认模板文件名：
+
+```text
+assets\templates\work_notice.png
+assets\templates\offwork_button.png
+assets\templates\field_offwork_button.png
+assets\templates\field_confirm_button.png
+```
+
+测试模板：
+
+```powershell
+python scripts\find_scrcpy_template.py assets\templates\work_notice.png
+```
+
+等待模板并点击：
+
+```powershell
+python scripts\click_scrcpy_template.py assets\templates\work_notice.png
 ```
 
 ## ok-script 主界面和安装包
@@ -277,13 +308,19 @@ python scripts\dingtalk_offwork_sequence.py --workday-only --date 2026-05-09 --n
 python scripts\dingtalk_offwork_sequence.py --workday-only --date 2026-05-10 --no-open-dingtalk
 ```
 
-注册 Windows 计划任务，例如每天 18:05 触发：
+注册 Windows 计划任务。默认目标时间是早上 `09:00` 和晚上 `18:30`，脚本会提前 5 分钟触发，再随机等待 0 到 10 分钟，所以实际执行时间落在目标时间前后约 5 分钟：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_offwork_task.ps1 -Time 18:05
+powershell -ExecutionPolicy Bypass -File scripts\install_offwork_task.ps1
 ```
 
-计划任务每天运行一次，是否真正点击由脚本内的 `--workday-only` 判断决定。这样能覆盖普通周末、法定节假日，以及调休上班的周六/周日。
+自定义时间和随机范围：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_offwork_task.ps1 -MorningTime 09:00 -EveningTime 18:30 -RandomWindowMinutes 5
+```
+
+计划任务每天运行两次，是否真正点击由脚本内的 `--workday-only` 判断决定。这样能覆盖普通周末、法定节假日，以及调休上班的周六/周日。
 
 ## ok-script 调试入口
 

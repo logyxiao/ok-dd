@@ -7,19 +7,65 @@ import subprocess
 import sys
 import threading
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+import cv2
 
 from src.run_state import LOG_DIR, completed_today, load_state, read_recent_actions
 from src.paths import app_root, resource_path
+from src.scrcpy import capture_window, close_window, ensure_any_scrcpy_window
+from src.vision import find_template, load_template, wait_click_template, wait_template
 from src.workday import describe_china_workday, is_china_workday
 
 ROOT = app_root()
 WEB_DIR = resource_path("web")
-TASK_NAME = "DingTalk Offwork Clock"
+TASK_NAME = "DingTalk Clock"
+LEGACY_TASK_NAMES = ["DingTalk Offwork Clock"]
+TASKS = {
+    "morning": {"name": "DingTalk Morning Clock", "label": "早上打卡"},
+    "evening": {"name": "DingTalk Evening Clock", "label": "晚上打卡"},
+}
+TEMPLATE_DIR = ROOT / "assets" / "templates"
+SCREENSHOT_DIR = ROOT / "screenshots"
+CURRENT_SCREENSHOT = SCREENSHOT_DIR / "current_screen.png"
+TEMPLATE_STEPS = {
+    "morning.work_notice": {"mode": "morning", "mode_label": "上班打卡", "label": "打开上班打卡入口", "file": "morning_work_notice.png", "action": "click"},
+    "morning.clock_button": {"mode": "morning", "mode_label": "上班打卡", "label": "点击打卡上班", "file": "morning_clock_button.png", "action": "click"},
+    "morning.field_clock_button": {
+        "mode": "morning",
+        "mode_label": "上班打卡",
+        "label": "点击外勤打卡上班",
+        "file": "morning_field_clock_button.png",
+        "action": "click",
+    },
+    "morning.success_text": {
+        "mode": "morning",
+        "mode_label": "上班打卡",
+        "label": "确认上班打卡成功",
+        "file": "morning_success_text.png",
+        "action": "verify",
+    },
+    "evening.work_notice": {"mode": "evening", "mode_label": "下班打卡", "label": "打开下班打卡入口", "file": "work_notice.png", "action": "click"},
+    "evening.offwork_button": {"mode": "evening", "mode_label": "下班打卡", "label": "点击打卡下班", "file": "offwork_button.png", "action": "click"},
+    "evening.field_offwork_button": {
+        "mode": "evening",
+        "mode_label": "下班打卡",
+        "label": "点击外勤打卡下班",
+        "file": "field_offwork_button.png",
+        "action": "click",
+    },
+    "evening.success_text": {
+        "mode": "evening",
+        "mode_label": "下班打卡",
+        "label": "确认下班打卡成功",
+        "file": "offwork_success_text.png",
+        "action": "verify",
+    },
+}
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -27,7 +73,13 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def automation_command(workday_only: bool = False, dry_run: bool = False, keep_scrcpy: bool = False) -> list[str]:
+def automation_command(
+    workday_only: bool = False,
+    dry_run: bool = False,
+    keep_scrcpy: bool = False,
+    random_delay_minutes: float = 0,
+    mode: str = "auto",
+) -> list[str]:
     if is_frozen():
         exe = Path(sys.executable)
         if exe.name.lower() == "ok-dingtalk-panel.exe":
@@ -44,6 +96,10 @@ def automation_command(workday_only: bool = False, dry_run: bool = False, keep_s
         command.append("--dry-run")
     if keep_scrcpy:
         command.append("--keep-scrcpy")
+    if random_delay_minutes > 0:
+        command.extend(["--random-delay-minutes", str(random_delay_minutes)])
+    if mode:
+        command.extend(["--mode", mode])
     return command
 
 
@@ -65,10 +121,10 @@ def powershell(command: str, timeout: int = 15) -> subprocess.CompletedProcess:
     )
 
 
-def get_task_info() -> dict:
+def get_single_task_info(task_name: str) -> dict:
     command = (
-        f"$t=Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue; "
-        f"$i=Get-ScheduledTaskInfo -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue; "
+        f"$t=Get-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue; "
+        f"$i=Get-ScheduledTaskInfo -TaskName '{task_name}' -ErrorAction SilentlyContinue; "
         "if ($t -and $i) { "
         "[pscustomobject]@{installed=$true;state=$t.State.ToString();nextRun=$i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss');"
         "lastRun=$i.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss');lastResult=$i.LastTaskResult} | ConvertTo-Json -Compress "
@@ -80,15 +136,101 @@ def get_task_info() -> dict:
             return {"installed": False}
         data = json.loads(result.stdout.strip() or "{}")
         return {
-                "installed": bool(data.get("installed")),
-                "state": data.get("state", ""),
-                "enabled": data.get("state", "") != "Disabled",
-                "next_run": data.get("nextRun", ""),
-                "last_run": data.get("lastRun", ""),
-                "last_result": data.get("lastResult", ""),
+            "installed": bool(data.get("installed")),
+            "state": data.get("state", ""),
+            "enabled": data.get("state", "") != "Disabled",
+            "next_run": data.get("nextRun", ""),
+            "last_run": data.get("lastRun", ""),
+            "last_result": data.get("lastResult", ""),
         }
     except Exception as exc:
         return {"installed": False, "error": str(exc)}
+
+
+def get_task_info() -> dict:
+    tasks = {}
+    for key, meta in TASKS.items():
+        info = get_single_task_info(meta["name"])
+        info["name"] = meta["name"]
+        info["label"] = meta["label"]
+        tasks[key] = info
+
+    installed_tasks = [task for task in tasks.values() if task.get("installed")]
+    enabled_tasks = [task for task in installed_tasks if task.get("enabled")]
+    next_runs = [task.get("next_run", "") for task in enabled_tasks if task.get("next_run")]
+    next_run = min(next_runs) if next_runs else ""
+    return {
+        "installed": bool(installed_tasks),
+        "all_installed": len(installed_tasks) == len(TASKS),
+        "enabled": bool(enabled_tasks),
+        "state": "Ready" if enabled_tasks else ("Disabled" if installed_tasks else "Missing"),
+        "next_run": next_run,
+        "last_run": max([task.get("last_run", "") for task in installed_tasks if task.get("last_run")] or [""]),
+        "last_result": "",
+        "tasks": tasks,
+    }
+
+
+def parse_hhmm(value: str) -> datetime:
+    return datetime.strptime(value, "%H:%M")
+
+
+def trigger_time_for_target(target_time: str, random_window_minutes: int) -> str:
+    target = parse_hhmm(target_time)
+    trigger = target - timedelta(minutes=random_window_minutes)
+    return trigger.strftime("%H:%M")
+
+
+def task_missing_result(result: subprocess.CompletedProcess) -> bool:
+    text = f"{result.stdout}\n{result.stderr}".lower()
+    return "cannot find" in text or "找不到" in text or "不存在" in text
+
+
+def template_path(key: str) -> Path:
+    return TEMPLATE_DIR / TEMPLATE_STEPS[key]["file"]
+
+
+def template_payload(key: str) -> dict:
+    meta = TEMPLATE_STEPS[key]
+    path = template_path(key)
+    return {
+        "key": key,
+        "mode": meta["mode"],
+        "mode_label": meta["mode_label"],
+        "label": meta["label"],
+        "file": meta["file"],
+        "action": meta["action"],
+        "exists": path.exists(),
+        "size": path.stat().st_size if path.exists() else 0,
+        "url": f"/api/template-file?key={key}&t={int(path.stat().st_mtime) if path.exists() else 0}",
+    }
+
+
+def get_template_info() -> list[dict]:
+    TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+    return [template_payload(key) for key in TEMPLATE_STEPS]
+
+
+def parse_multipart(raw: bytes, boundary: bytes) -> dict[str, bytes]:
+    fields: dict[str, bytes] = {}
+    for part in raw.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        header, _, body = part.partition(b"\r\n\r\n")
+        disposition = ""
+        for line in header.decode("utf-8", errors="ignore").splitlines():
+            if line.lower().startswith("content-disposition:"):
+                disposition = line
+                break
+        name = ""
+        for item in disposition.split(";"):
+            item = item.strip()
+            if item.startswith("name="):
+                name = unquote(item.split("=", 1)[1].strip('"'))
+        if name:
+            fields[name] = body.rstrip(b"\r\n")
+    return fields
 
 
 class ProcessState:
@@ -179,10 +321,24 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             target = parse_qs(parsed.query).get("target", [""])[0]
             self.open_target(target)
             return
+        if parsed.path == "/api/template-file":
+            key = parse_qs(parsed.query).get("key", [""])[0]
+            self.serve_template_file(key)
+            return
+        if parsed.path == "/api/screenshot-file":
+            self.serve_screenshot_file()
+            return
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/upload-template":
+            self.with_json_errors(self.upload_template)
+            return
+        if parsed.path == "/api/capture-current-screen":
+            self.with_json_errors(self.capture_current_screen)
+            return
+
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8") if length else "{}"
         try:
@@ -209,6 +365,12 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             ok, message = PROCESS_STATE.stop()
             self.send_json({"ok": ok, "message": message, "process": PROCESS_STATE.snapshot()})
             return
+        if parsed.path == "/api/test-template":
+            self.with_json_errors(lambda: self.test_template(payload))
+            return
+        if parsed.path == "/api/click-template":
+            self.with_json_errors(lambda: self.click_template(payload))
+            return
         if parsed.path == "/api/shutdown":
             self.send_json({"ok": True})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -226,6 +388,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
                 "will_run": is_china_workday(),
             },
             "task": get_task_info(),
+            "templates": get_template_info(),
             "logs": logs,
             "process": PROCESS_STATE.snapshot(),
         }
@@ -235,61 +398,84 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             workday_only=bool(payload.get("workday_only")),
             dry_run=bool(payload.get("dry_run")),
             keep_scrcpy=bool(payload.get("keep_scrcpy")),
+            mode=str(payload.get("mode") or "auto"),
         )
         ok, message = PROCESS_STATE.start(command)
         self.send_json({"ok": ok, "message": message, "process": PROCESS_STATE.snapshot()})
 
     def install_task(self, payload: dict) -> None:
-        time_text = str(payload.get("time") or "18:05").strip()
+        morning_time = str(payload.get("morning_time") or "09:00").strip()
+        evening_time = str(payload.get("evening_time") or "18:30").strip()
         workday_only = bool(payload.get("workday_only", True))
-        command_text = subprocess.list2cmdline(automation_command(workday_only=workday_only))
-        command = [
-            "schtasks",
-            "/Create",
-            "/TN",
-            TASK_NAME,
-            "/TR",
-            command_text,
-            "/SC",
-            "DAILY",
-            "/ST",
-            time_text,
-            "/F",
-        ]
-        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, creationflags=CREATE_NO_WINDOW)
+        random_window_minutes = int(payload.get("random_window_minutes") or 5)
+        random_delay_minutes = random_window_minutes * 2
+        outputs = []
+        ok = True
+        for key, target_time in {"morning": morning_time, "evening": evening_time}.items():
+            task_name = TASKS[key]["name"]
+            trigger_time = trigger_time_for_target(target_time, random_window_minutes)
+            command_text = subprocess.list2cmdline(
+                automation_command(workday_only=workday_only, random_delay_minutes=random_delay_minutes, mode=key)
+            )
+            command = [
+                "schtasks",
+                "/Create",
+                "/TN",
+                task_name,
+                "/TR",
+                command_text,
+                "/SC",
+                "DAILY",
+                "/ST",
+                trigger_time,
+                "/F",
+            ]
+            result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, creationflags=CREATE_NO_WINDOW)
+            outputs.append({"task": task_name, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+            ok = ok and (result.returncode == 0 or task_missing_result(result))
         self.send_json(
             {
-                "ok": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "ok": ok,
+                "stdout": "\n".join(item["stdout"] for item in outputs),
+                "stderr": "\n".join(item["stderr"] for item in outputs),
+                "outputs": outputs,
                 "task": get_task_info(),
             }
         )
 
     def delete_task(self) -> None:
-        result = subprocess.run(
-            ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        self.send_json({"ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+        outputs = []
+        ok = True
+        for task_name in [meta["name"] for meta in TASKS.values()] + LEGACY_TASK_NAMES:
+            result = subprocess.run(
+                ["schtasks", "/Delete", "/TN", task_name, "/F"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            outputs.append({"task": task_name, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+            ok = ok and result.returncode == 0
+        self.send_json({"ok": ok, "outputs": outputs, "task": get_task_info()})
 
     def set_task_enabled(self, enabled: bool) -> None:
         action = "/Enable" if enabled else "/Disable"
-        result = subprocess.run(
-            ["schtasks", "/Change", "/TN", TASK_NAME, action],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        outputs = []
+        ok = True
+        for meta in TASKS.values():
+            result = subprocess.run(
+                ["schtasks", "/Change", "/TN", meta["name"], action],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            outputs.append({"task": meta["name"], "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+            ok = ok and result.returncode == 0
         self.send_json(
             {
-                "ok": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "ok": ok,
+                "outputs": outputs,
                 "task": get_task_info(),
             }
         )
@@ -299,12 +485,166 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             path = LOG_DIR
         elif target == "screenshots":
             path = ROOT / "screenshots"
+        elif target == "templates":
+            path = TEMPLATE_DIR
         else:
             self.send_json({"ok": False, "message": "未知目标目录"}, status=HTTPStatus.BAD_REQUEST)
             return
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(path)
         self.send_json({"ok": True})
+
+    def upload_template(self) -> None:
+        content_type = self.headers.get("Content-Type", "")
+        boundary_token = "boundary="
+        if boundary_token not in content_type:
+            self.send_json({"ok": False, "message": "上传请求缺少 boundary"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        boundary_value = content_type.split(boundary_token, 1)[1].split(";", 1)[0].strip().strip('"')
+        boundary = ("--" + boundary_value).encode("utf-8")
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length)
+        fields = parse_multipart(raw, boundary)
+        key = fields.get("key", b"").decode("utf-8", errors="ignore")
+        image = fields.get("file")
+        if key not in TEMPLATE_STEPS:
+            self.send_json({"ok": False, "message": "未知模板步骤"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not image:
+            self.send_json({"ok": False, "message": "未收到模板图片"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+        path = TEMPLATE_DIR / TEMPLATE_STEPS[key]["file"]
+        path.write_bytes(image)
+        try:
+            load_template(path)
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            self.send_json({"ok": False, "message": f"模板图片无法识别：{exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"ok": True, "template": template_payload(key)})
+
+    def capture_current_screen(self) -> None:
+        hwnd, started = ensure_any_scrcpy_window(timeout=20)
+        try:
+            frame = capture_window(hwnd)
+            SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(CURRENT_SCREENSHOT), frame):
+                raise RuntimeError("保存截图失败")
+            width = int(frame.shape[1])
+            height = int(frame.shape[0])
+            url = f"/api/screenshot-file?t={int(CURRENT_SCREENSHOT.stat().st_mtime)}"
+            self.send_json(
+                {
+                    "ok": True,
+                    "message": "已截图当前页面",
+                    "url": url,
+                    "width": width,
+                    "height": height,
+                    "scrcpy_started": started,
+                }
+            )
+        finally:
+            if started:
+                close_window(hwnd)
+
+    def test_template(self, payload: dict) -> None:
+        key = str(payload.get("key") or "")
+        threshold = float(payload.get("threshold") or 0.86)
+        if key not in TEMPLATE_STEPS:
+            self.send_json({"ok": False, "message": "未知模板步骤"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        path = template_path(key)
+        if not path.exists():
+            self.send_json({"ok": False, "message": "模板图片不存在"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        hwnd, started = ensure_any_scrcpy_window(timeout=20)
+        try:
+            frame = capture_window(hwnd)
+            match = find_template(frame, load_template(path), threshold=threshold)
+            if not match:
+                self.send_json({"ok": False, "message": "未识别到模板", "template": template_payload(key)})
+                return
+            relative_x, relative_y = match.center_relative
+            self.send_json(
+                {
+                    "ok": True,
+                    "message": "已识别到模板",
+                    "score": match.score,
+                    "relative": [relative_x, relative_y],
+                    "box": {"x": match.x, "y": match.y, "width": match.width, "height": match.height},
+                    "template": template_payload(key),
+                }
+            )
+        finally:
+            if started:
+                pass
+
+    def click_template(self, payload: dict) -> None:
+        key = str(payload.get("key") or "")
+        threshold = float(payload.get("threshold") or 0.86)
+        timeout = float(payload.get("timeout") or 25)
+        if key not in TEMPLATE_STEPS:
+            self.send_json({"ok": False, "message": "未知模板步骤"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        path = template_path(key)
+        if not path.exists():
+            self.send_json({"ok": False, "message": "模板图片不存在"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        hwnd, started = ensure_any_scrcpy_window(timeout=20)
+        try:
+            if TEMPLATE_STEPS[key].get("action") == "verify":
+                match = wait_template(hwnd, path, threshold=threshold, timeout=timeout)
+                relative_x, relative_y = match.center_relative
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": "已识别到确认模板",
+                        "score": match.score,
+                        "relative": [relative_x, relative_y],
+                        "template": template_payload(key),
+                    }
+                )
+                return
+            match, clicked_at = wait_click_template(hwnd, path, threshold=threshold, timeout=timeout)
+            relative_x, relative_y = match.center_relative
+            self.send_json(
+                {
+                    "ok": True,
+                    "message": "已识别并点击模板",
+                    "score": match.score,
+                    "relative": [relative_x, relative_y],
+                    "screen": [clicked_at[0], clicked_at[1]],
+                    "template": template_payload(key),
+                }
+            )
+        finally:
+            if started:
+                pass
+
+    def serve_template_file(self, key: str) -> None:
+        if key not in TEMPLATE_STEPS:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        path = template_path(key)
+        if not path.exists():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(path.read_bytes())
+
+    def serve_screenshot_file(self) -> None:
+        if not CURRENT_SCREENSHOT.exists():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(CURRENT_SCREENSHOT.read_bytes())
 
     def serve_static(self, path: str) -> None:
         if path in ("", "/"):
@@ -323,6 +663,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         }
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_types.get(file_path.suffix, "application/octet-stream"))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(file_path.read_bytes())
 
@@ -333,6 +674,12 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def with_json_errors(self, action) -> None:
+        try:
+            action()
+        except Exception as exc:
+            self.send_json({"ok": False, "message": f"服务器处理失败：{exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def log_message(self, format: str, *args) -> None:
         return

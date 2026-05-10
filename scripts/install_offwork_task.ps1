@@ -1,6 +1,9 @@
 param(
-    [string]$TaskName = "DingTalk Offwork Clock",
-    [string]$Time = "18:05"
+    [string]$MorningTaskName = "DingTalk Morning Clock",
+    [string]$EveningTaskName = "DingTalk Evening Clock",
+    [string]$MorningTime = "09:00",
+    [string]$EveningTime = "18:30",
+    [int]$RandomWindowMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,21 +11,38 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $Python = (Get-Command python).Source
 $Script = Join-Path $Root "scripts\dingtalk_offwork_sequence.py"
-$Arguments = "`"$Script`" --workday-only"
+$RandomDelayMinutes = $RandomWindowMinutes * 2
+$MorningArguments = "`"$Script`" --workday-only --random-delay-minutes $RandomDelayMinutes --mode morning"
+$EveningArguments = "`"$Script`" --workday-only --random-delay-minutes $RandomDelayMinutes --mode evening"
 
-$Action = New-ScheduledTaskAction -Execute $Python -Argument $Arguments -WorkingDirectory $Root
-$Trigger = New-ScheduledTaskTrigger -Daily -At $Time
+function Get-TriggerTime([string]$TargetTime, [int]$MinusMinutes) {
+    return ([datetime]::ParseExact($TargetTime, "HH:mm", $null).AddMinutes(-$MinusMinutes)).ToString("HH:mm")
+}
+
+$MorningAction = New-ScheduledTaskAction -Execute $Python -Argument $MorningArguments -WorkingDirectory $Root
+$EveningAction = New-ScheduledTaskAction -Execute $Python -Argument $EveningArguments -WorkingDirectory $Root
+$MorningTrigger = New-ScheduledTaskTrigger -Daily -At (Get-TriggerTime $MorningTime $RandomWindowMinutes)
+$EveningTrigger = New-ScheduledTaskTrigger -Daily -At (Get-TriggerTime $EveningTime $RandomWindowMinutes)
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
 Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $Action `
-    -Trigger $Trigger `
+    -TaskName $MorningTaskName `
+    -Action $MorningAction `
+    -Trigger $MorningTrigger `
     -Settings $Settings `
-    -Description "在中国工作日运行钉钉下班打卡点击序列。" `
+    -Description "在中国工作日早上目标时间前后随机执行钉钉打卡脚本。" `
     -Force
 
-Write-Host "已注册计划任务：$TaskName"
-Write-Host "执行时间：$Time"
+Register-ScheduledTask `
+    -TaskName $EveningTaskName `
+    -Action $EveningAction `
+    -Trigger $EveningTrigger `
+    -Settings $Settings `
+    -Description "在中国工作日晚上目标时间前后随机执行钉钉打卡脚本。" `
+    -Force
+
+Write-Host "已注册计划任务：$MorningTaskName，目标时间：$MorningTime，随机范围：前后 $RandomWindowMinutes 分钟"
+Write-Host "已注册计划任务：$EveningTaskName，目标时间：$EveningTime，随机范围：前后 $RandomWindowMinutes 分钟"
 Write-Host "工作目录：$Root"
-Write-Host "执行命令：$Python $Arguments"
+Write-Host "早上执行命令：$Python $MorningArguments"
+Write-Host "晚上执行命令：$Python $EveningArguments"

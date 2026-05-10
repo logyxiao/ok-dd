@@ -24,5 +24,6 @@ class OffworkSequenceTask(BaseTask):
             fresh=dingtalk_config.get("fresh_start", True),
             keep_scrcpy=dingtalk_config.get("keep_scrcpy", False),
             open_dingtalk=True,
+            mode=dingtalk_config.get("mode", "evening"),
             progress=lambda message: self.log_info(message),
         )

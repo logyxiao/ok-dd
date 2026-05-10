@@ -22,10 +22,12 @@
           <button class="nav-item active" data-tab="dashboard"><span>▦</span> 仪表盘</button>
           <button class="nav-item" data-tab="run"><span>▶</span> 执行控制</button>
           <button class="nav-item" data-tab="schedule"><span>◷</span> 自动计划</button>
+          <button class="nav-item" data-tab="templates"><span>◎</span> 模板识别</button>
           <button class="nav-item" data-tab="logs"><span>≡</span> 操作日志</button>
           <div class="nav-section">工具</div>
           <button class="nav-item" id="openLogs"><span>□</span> 日志目录</button>
           <button class="nav-item" id="openShots"><span>◫</span> 截图目录</button>
+          <button class="nav-item" id="openTemplates"><span>▣</span> 模板目录</button>
           <button class="nav-item" id="shutdownPanel"><span>⏻</span> 退出面板</button>
         </nav>
 
@@ -146,8 +148,16 @@
             </div>
             <div class="schedule-row">
               <label>
-                <span>每天执行时间</span>
-                <input id="scheduleTime" value="18:05" />
+                <span>早上目标时间</span>
+                <input id="morningTime" value="09:00" />
+              </label>
+              <label>
+                <span>晚上目标时间</span>
+                <input id="eveningTime" value="18:30" />
+              </label>
+              <label>
+                <span>随机范围（分钟）</span>
+                <input id="randomWindowMinutes" value="5" />
               </label>
               <label class="check-row"><input type="checkbox" id="scheduleWorkdayOnly" checked /> 仅中国工作日执行</label>
             </div>
@@ -169,7 +179,50 @@
               <div><span>上次结果</span><strong id="detailResult">--</strong></div>
               <div><span>当前执行</span><strong id="detailRunning">--</strong></div>
             </div>
+            <div class="table-wrap task-table">
+              <table>
+                <thead>
+                  <tr><th>计划</th><th>启用状态</th><th>下次运行</th><th>上次运行</th><th>结果</th></tr>
+                </thead>
+                <tbody id="taskRows"></tbody>
+              </table>
+            </div>
           </section>
+        </section>
+
+        <section class="tab-page" id="templates">
+          <section class="panel form-panel">
+            <div class="panel-head">
+              <h2>模板识别</h2>
+              <span>上传小图后，脚本会等待画面出现目标再点击</span>
+            </div>
+            <div class="template-settings">
+              <label>
+                <span>识别阈值</span>
+                <input id="templateThreshold" value="0.86" />
+              </label>
+              <label>
+                <span>等待秒数</span>
+                <input id="templateTimeout" value="25" />
+              </label>
+            </div>
+          </section>
+          <section class="panel screen-panel">
+            <div class="panel-head">
+              <div>
+                <h2>当前程序看到的页面</h2>
+                <p id="screenCaptureStatus">还没有截图</p>
+              </div>
+              <div class="head-actions">
+                <button class="secondary" id="captureScreen">截图当前页面</button>
+                <button class="ghost" data-open="screenshots">打开截图目录</button>
+              </div>
+            </div>
+            <div class="screen-preview" id="screenPreview">
+              <div class="screen-empty">点击“截图当前页面”后会显示 scrcpy 当前画面</div>
+            </div>
+          </section>
+          <section class="template-grid" id="templateGrid"></section>
         </section>
 
         <section class="tab-page" id="logs">

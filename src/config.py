@@ -18,7 +18,9 @@ scrcpy_option = ConfigOption(
 schedule_option = ConfigOption(
     "Schedule",
     {
-        "Offwork Time": "18:05",
+        "Morning Time": "09:00",
+        "Evening Time": "18:30",
+        "Random Window Minutes": 5,
         "Workday Only": True,
     },
     description="Windows scheduled task settings",
