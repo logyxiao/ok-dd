@@ -6,6 +6,8 @@ import socket
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime, timedelta
 from http import HTTPStatus
@@ -67,6 +69,7 @@ TEMPLATE_STEPS = {
     },
 }
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+DEFAULT_PORT = 8765
 
 
 def is_frozen() -> bool:
@@ -311,6 +314,9 @@ class WebPanelHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/ping":
+            self.send_json({"ok": True, "app": "OK-DingTalk"})
+            return
         if parsed.path == "/api/status":
             self.send_json(self.status_payload())
             return
@@ -685,18 +691,34 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         return
 
 
-def find_free_port(start: int = 8765) -> int:
-    for port in range(start, start + 50):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    raise RuntimeError("没有找到可用的本地端口")
+def existing_panel_url(port: int = DEFAULT_PORT) -> str:
+    url = f"http://127.0.0.1:{port}/api/ping"
+    try:
+        with urllib.request.urlopen(url, timeout=0.3) as response:
+            body = response.read(4096).decode("utf-8", errors="ignore")
+            if response.status == 200 and '"app": "OK-DingTalk"' in body:
+                return f"http://127.0.0.1:{port}/"
+    except (OSError, urllib.error.URLError):
+        return ""
+    return ""
+
+
+def find_free_port(start: int = DEFAULT_PORT) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", start))
+            return start
+        except OSError as exc:
+            raise RuntimeError(f"端口 {start} 已被占用，但没有检测到可复用的 OK-DingTalk 面板") from exc
 
 
 def start_web_panel(open_browser: bool = True) -> tuple[ThreadingHTTPServer, str]:
+    existing_url = existing_panel_url()
+    if existing_url:
+        if open_browser:
+            webbrowser.open(existing_url)
+        raise SystemExit(0)
+
     port = find_free_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), WebPanelHandler)
     url = f"http://127.0.0.1:{port}/"
