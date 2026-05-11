@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -34,6 +35,7 @@ TASKS = {
 TEMPLATE_DIR = ROOT / "assets" / "templates"
 SCREENSHOT_DIR = ROOT / "screenshots"
 CURRENT_SCREENSHOT = SCREENSHOT_DIR / "current_screen.png"
+SCHEDULE_FILE = LOG_DIR / "schedule_config.json"
 TEMPLATE_STEPS = {
     "morning.work_notice": {"mode": "morning", "mode_label": "上班打卡", "label": "打开上班打卡入口", "file": "morning_work_notice.png", "action": "click"},
     "morning.clock_button": {"mode": "morning", "mode_label": "上班打卡", "label": "点击打卡上班", "file": "morning_clock_button.png", "action": "click"},
@@ -124,13 +126,40 @@ def powershell(command: str, timeout: int = 15) -> subprocess.CompletedProcess:
     )
 
 
+def ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def parse_duration_minutes(value: str) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    match = re.fullmatch(r"(?:(\d+)\.)?(\d{1,2}):(\d{2}):(\d{2})", text)
+    if match:
+        days = int(match.group(1) or 0)
+        hours = int(match.group(2))
+        minutes = int(match.group(3))
+        seconds = int(match.group(4))
+        return days * 1440 + hours * 60 + minutes + seconds / 60
+    match = re.fullmatch(r"P(?:T)?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1) or 0) * 60 + int(match.group(2) or 0) + int(match.group(3) or 0) / 60
+    return 0
+
+
 def get_single_task_info(task_name: str) -> dict:
     command = (
         f"$t=Get-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue; "
         f"$i=Get-ScheduledTaskInfo -TaskName '{task_name}' -ErrorAction SilentlyContinue; "
         "if ($t -and $i) { "
+        "$trigger=($t.Triggers | Select-Object -First 1); "
+        "$action=($t.Actions | Select-Object -First 1); "
+        "$triggerTime=''; if ($trigger -and $trigger.StartBoundary) { $triggerTime=([datetime]$trigger.StartBoundary).ToString('HH:mm') }; "
+        "$randomDelay=''; if ($trigger -and $trigger.RandomDelay) { $randomDelay=$trigger.RandomDelay.ToString() }; "
+        "$arguments=''; if ($action -and $action.Arguments) { $arguments=$action.Arguments }; "
         "[pscustomobject]@{installed=$true;state=$t.State.ToString();nextRun=$i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss');"
-        "lastRun=$i.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss');lastResult=$i.LastTaskResult} | ConvertTo-Json -Compress "
+        "lastRun=$i.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss');lastResult=$i.LastTaskResult;"
+        "triggerTime=$triggerTime;randomDelay=$randomDelay;arguments=$arguments} | ConvertTo-Json -Compress "
         "} else { [pscustomobject]@{installed=$false;state='Missing'} | ConvertTo-Json -Compress }"
     )
     try:
@@ -138,6 +167,11 @@ def get_single_task_info(task_name: str) -> dict:
         if result.returncode != 0:
             return {"installed": False}
         data = json.loads(result.stdout.strip() or "{}")
+        arguments = data.get("arguments", "") or ""
+        random_delay_match = re.search(r"--random-delay-minutes\s+([0-9.]+)", arguments)
+        command_random_delay_minutes = float(random_delay_match.group(1)) if random_delay_match else 0
+        trigger_random_delay_minutes = parse_duration_minutes(data.get("randomDelay", ""))
+        random_delay_minutes = max(command_random_delay_minutes, trigger_random_delay_minutes)
         return {
             "installed": bool(data.get("installed")),
             "state": data.get("state", ""),
@@ -145,6 +179,9 @@ def get_single_task_info(task_name: str) -> dict:
             "next_run": data.get("nextRun", ""),
             "last_run": data.get("lastRun", ""),
             "last_result": data.get("lastResult", ""),
+            "trigger_time": data.get("triggerTime", ""),
+            "random_delay": data.get("randomDelay", ""),
+            "random_delay_minutes": random_delay_minutes,
         }
     except Exception as exc:
         return {"installed": False, "error": str(exc)}
@@ -158,6 +195,7 @@ def get_task_info() -> dict:
         info["label"] = meta["label"]
         tasks[key] = info
 
+    apply_target_next_runs(tasks)
     installed_tasks = [task for task in tasks.values() if task.get("installed")]
     enabled_tasks = [task for task in installed_tasks if task.get("enabled")]
     next_runs = [task.get("next_run", "") for task in enabled_tasks if task.get("next_run")]
@@ -182,6 +220,60 @@ def trigger_time_for_target(target_time: str, random_window_minutes: int) -> str
     target = parse_hhmm(target_time)
     trigger = target - timedelta(minutes=random_window_minutes)
     return trigger.strftime("%H:%M")
+
+
+def save_schedule_config(morning_time: str, evening_time: str, random_window_minutes: int, workday_only: bool) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "morning_time": morning_time,
+        "evening_time": evening_time,
+        "random_window_minutes": random_window_minutes,
+        "workday_only": workday_only,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    SCHEDULE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_schedule_config() -> dict:
+    if not SCHEDULE_FILE.exists():
+        return {}
+    try:
+        return json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def next_target_run(target_time: str, now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    parsed = parse_hhmm(target_time)
+    candidate = now.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def add_minutes_to_hhmm(value: str, minutes: float) -> str:
+    parsed = parse_hhmm(value)
+    return (parsed + timedelta(minutes=minutes)).strftime("%H:%M")
+
+
+def apply_target_next_runs(tasks: dict) -> None:
+    schedule = load_schedule_config()
+    configured_targets = {"morning": schedule.get("morning_time"), "evening": schedule.get("evening_time")}
+    for key, task in tasks.items():
+        if not task.get("installed"):
+            continue
+        target_time = configured_targets.get(key)
+        if not target_time and task.get("trigger_time"):
+            random_window_minutes = float(task.get("random_delay_minutes") or 0) / 2
+            target_time = add_minutes_to_hhmm(str(task["trigger_time"]), random_window_minutes)
+        if not target_time:
+            continue
+        try:
+            task["target_time"] = str(target_time)
+            task["next_run"] = next_target_run(str(target_time))
+        except ValueError:
+            continue
 
 
 def task_missing_result(result: subprocess.CompletedProcess) -> bool:
@@ -420,25 +512,26 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         for key, target_time in {"morning": morning_time, "evening": evening_time}.items():
             task_name = TASKS[key]["name"]
             trigger_time = trigger_time_for_target(target_time, random_window_minutes)
-            command_text = subprocess.list2cmdline(
-                automation_command(workday_only=workday_only, random_delay_minutes=random_delay_minutes, mode=key)
+            command_parts = automation_command(workday_only=workday_only, random_delay_minutes=0, mode=key)
+            execute = command_parts[0]
+            arguments = subprocess.list2cmdline(command_parts[1:])
+            random_delay_iso = f"PT{random_delay_minutes}M"
+            ps_command = "; ".join(
+                [
+                    "$ErrorActionPreference='Stop'",
+                    f"$Action=New-ScheduledTaskAction -Execute {ps_quote(execute)} -Argument {ps_quote(arguments)} -WorkingDirectory {ps_quote(str(ROOT))}",
+                    f"$Trigger=New-ScheduledTaskTrigger -Daily -At {ps_quote(trigger_time)}",
+                    f"$Trigger.RandomDelay={ps_quote(random_delay_iso)}",
+                    "$Settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+                    f"Register-ScheduledTask -TaskName {ps_quote(task_name)} -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null",
+                    f"Write-Output {ps_quote('已注册计划任务：' + task_name + '，触发时间：' + trigger_time + '，Windows随机延迟：' + random_delay_iso)}",
+                ]
             )
-            command = [
-                "schtasks",
-                "/Create",
-                "/TN",
-                task_name,
-                "/TR",
-                command_text,
-                "/SC",
-                "DAILY",
-                "/ST",
-                trigger_time,
-                "/F",
-            ]
-            result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, creationflags=CREATE_NO_WINDOW)
+            result = powershell(ps_command, timeout=30)
             outputs.append({"task": task_name, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
             ok = ok and (result.returncode == 0 or task_missing_result(result))
+        if ok:
+            save_schedule_config(morning_time, evening_time, random_window_minutes, workday_only)
         self.send_json(
             {
                 "ok": ok,
@@ -462,6 +555,8 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             )
             outputs.append({"task": task_name, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
             ok = ok and result.returncode == 0
+        if ok and SCHEDULE_FILE.exists():
+            SCHEDULE_FILE.unlink()
         self.send_json({"ok": ok, "outputs": outputs, "task": get_task_info()})
 
     def set_task_enabled(self, enabled: bool) -> None:

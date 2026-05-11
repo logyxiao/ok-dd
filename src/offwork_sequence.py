@@ -7,6 +7,7 @@ from typing import Callable
 
 from src.adb import force_stop_package, launch_package, lock_screen
 from src.run_state import append_action, mark_completed
+from src.paths import resource_path
 from src.scrcpy import click_scrcpy_relative, close_window, ensure_any_scrcpy_window
 from src.vision import wait_click_template, wait_template
 
@@ -99,7 +100,7 @@ def run_offwork_sequence(
 
     hwnd, started_scrcpy = ensure_any_scrcpy_window(title, timeout=timeout)
     emit(f"scrcpy 窗口：句柄={hwnd}，本次启动={'是' if started_scrcpy else '否'}")
-    template_dir = template_dir or Path("assets/templates")
+    template_dir = template_dir or resource_path("assets/templates")
 
     def execute_step(index: int, step: ClickStep, timeout_seconds: float) -> tuple[str, dict]:
         template_path = template_dir / step.template if step.template else None

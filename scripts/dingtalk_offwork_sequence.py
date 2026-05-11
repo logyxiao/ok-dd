@@ -65,17 +65,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     run_date = parse_date(args.date) if args.date else date.today()
+    mode = args.mode
+    if mode == "auto":
+        mode = "morning" if datetime.now().hour < 12 else "evening"
+    action_name = "上班打卡序列" if mode == "morning" else "下班打卡序列"
 
     if args.workday_only:
         description = describe_china_workday(run_date)
         print(description)
         if not is_china_workday(run_date):
             print("跳过：今天不是中国工作日")
-            append_action("下班打卡序列", "跳过", "今天不是中国工作日", {"date": run_date.isoformat()})
+            append_action(action_name, "跳过", "今天不是中国工作日", {"date": run_date.isoformat(), "mode": mode})
             return 0
     if args.dry_run:
         print("检查完成：今天会执行点击序列")
-        append_action("下班打卡序列", "检查", "今天会执行点击序列", {"date": run_date.isoformat()})
+        append_action(action_name, "检查", "今天会执行点击序列", {"date": run_date.isoformat(), "mode": mode})
         return 0
 
     try:
@@ -90,9 +94,6 @@ def main() -> int:
                 {"seconds": wait_seconds, "max_seconds": max_seconds},
             )
             time.sleep(wait_seconds)
-        mode = args.mode
-        if mode == "auto":
-            mode = "morning" if datetime.now().hour < 12 else "evening"
         print(f"打卡模式：{'上班打卡' if mode == 'morning' else '下班打卡'}")
         run_offwork_sequence(
             package=args.package,
