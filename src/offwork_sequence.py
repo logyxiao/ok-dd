@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import cv2
+
 from src.adb import force_stop_package, launch_package, lock_screen
+from src.power import keep_system_awake, restore_sleep, wake_display
 from src.run_state import append_action, mark_completed
-from src.paths import resource_path
-from src.scrcpy import click_scrcpy_relative, close_window, ensure_any_scrcpy_window
-from src.vision import wait_click_template, wait_template
+from src.paths import app_root, resource_path
+from src.scrcpy import capture_window, click_scrcpy_relative, close_window, ensure_any_scrcpy_window
+from src.vision import best_template_match, load_template, wait_click_template
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,9 @@ def run_offwork_sequence(
     sequence = CLOCK_STEPS[mode]
     sequence_name = sequence["name"]
     steps = sequence["steps"]
+    keep_system_awake()
+    wake_display()
+    emit("已请求 Windows 保持唤醒并唤醒显示器")
 
     if open_dingtalk:
         emit("打开钉钉")
@@ -102,46 +109,122 @@ def run_offwork_sequence(
     emit(f"scrcpy 窗口：句柄={hwnd}，本次启动={'是' if started_scrcpy else '否'}")
     template_dir = template_dir or resource_path("assets/templates")
 
+    def paired_templates(index: int, step: ClickStep) -> list[tuple[str, ClickStep, Path]]:
+        candidates = []
+        step_index = index - 1
+        for candidate_mode, candidate_sequence in CLOCK_STEPS.items():
+            candidate_steps = candidate_sequence["steps"]
+            if step_index >= len(candidate_steps):
+                continue
+            candidate_step = candidate_steps[step_index]
+            if candidate_step.action != step.action or not candidate_step.template:
+                continue
+            candidate_path = template_dir / candidate_step.template
+            if candidate_path.exists():
+                candidates.append((candidate_mode, candidate_step, candidate_path))
+        return candidates
+
+    def save_diagnostic_frame(frame, reason: str) -> Path | None:
+        path = app_root() / "screenshots" / f"diagnostic_{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{reason}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path if cv2.imwrite(str(path), frame) else None
+
+    def frame_is_blank(frame) -> bool:
+        return float(frame.std()) < 2.0 or float(frame.mean()) < 3.0
+
+    def restart_scrcpy(reason: str) -> None:
+        nonlocal hwnd, started_scrcpy
+        emit(f"scrcpy 画面异常，重启 scrcpy：{reason}")
+        append_action(sequence_name, "重试", f"scrcpy 画面异常，重启：{reason}")
+        close_window(hwnd)
+        time.sleep(1.5)
+        hwnd, restarted = ensure_any_scrcpy_window(title, timeout=timeout)
+        started_scrcpy = started_scrcpy or restarted
+        wake_display()
+        emit(f"scrcpy 已恢复：句柄={hwnd}")
+
+    def wait_best_template(candidates: list[tuple[str, ClickStep, Path]], timeout_seconds: float):
+        loaded = [(candidate_mode, candidate_step, candidate_path, load_template(candidate_path)) for candidate_mode, candidate_step, candidate_path in candidates]
+        deadline = time.monotonic() + timeout_seconds
+        best_seen = None
+        blank_frames = 0
+        restarted_for_blank = False
+        while time.monotonic() < deadline:
+            frame = capture_window(hwnd)
+            if frame_is_blank(frame):
+                blank_frames += 1
+                if blank_frames == 1:
+                    saved = save_diagnostic_frame(frame, "blank")
+                    emit(f"检测到疑似黑屏/空画面，均值={frame.mean():.1f}，方差={frame.std():.1f}，诊断截图={saved or '保存失败'}")
+                if blank_frames >= 4 and not restarted_for_blank:
+                    restarted_for_blank = True
+                    restart_scrcpy("连续捕获到黑屏/空画面")
+                    blank_frames = 0
+                    continue
+            else:
+                blank_frames = 0
+            matches = []
+            for candidate_mode, candidate_step, candidate_path, template in loaded:
+                match = best_template_match(frame, template)
+                if match:
+                    matches.append((match.score, candidate_mode, candidate_step, candidate_path, match))
+                    if not best_seen or match.score > best_seen[0]:
+                        best_seen = (match.score, candidate_mode, candidate_step, candidate_path, match)
+            ready = [item for item in matches if item[0] >= template_threshold]
+            if ready:
+                _score, candidate_mode, candidate_step, candidate_path, match = max(ready, key=lambda item: item[0])
+                return candidate_mode, candidate_step, candidate_path, match, best_seen
+            time.sleep(0.5)
+        best_text = "无"
+        if best_seen:
+            best_text = f"{best_seen[3]}={best_seen[0]:.3f}"
+        try:
+            final_frame = capture_window(hwnd)
+            saved = save_diagnostic_frame(final_frame, "timeout")
+        except Exception:
+            saved = None
+        candidate_text = "，".join(str(candidate_path) for _mode, _step, candidate_path in candidates)
+        raise TimeoutError(f"等待模板出现超时：{candidate_text}，最佳相似度：{best_text}，诊断截图：{saved or '保存失败'}")
+
     def execute_step(index: int, step: ClickStep, timeout_seconds: float) -> tuple[str, dict]:
         template_path = template_dir / step.template if step.template else None
+        candidates = paired_templates(index, step)
         if step.action == "verify":
-            if not use_templates or not template_path or not template_path.exists():
+            if not use_templates or not candidates:
                 raise FileNotFoundError(f"{step.name}需要配置成功文字模板：{template_path}")
-            emit(f"{index}. 等待确认：{step.name}（模板：{template_path.name}）")
-            match = wait_template(hwnd, template_path, threshold=template_threshold, timeout=timeout_seconds)
+            emit(f"{index}. 等待确认：{step.name}（同步识别上班/下班成功模板）")
+            matched_mode, matched_step, matched_path, match, _best_seen = wait_best_template(candidates, timeout_seconds)
             relative_x, relative_y = match.center_relative
             message = (
-                f"{index}. {step.name}：已识别成功文字，相似度={match.score:.3f} "
+                f"{index}. {matched_step.name}：已识别成功文字，模式={matched_mode}，相似度={match.score:.3f} "
                 f"相对坐标={relative_x:.3f},{relative_y:.3f}"
             )
             details = {
                 "index": index,
                 "mode": mode,
+                "matched_mode": matched_mode,
                 "action": step.action,
-                "template": str(template_path),
+                "template": str(matched_path),
                 "score": match.score,
                 "relative": [relative_x, relative_y],
             }
             return message, details
 
-        if use_templates and template_path and template_path.exists():
-            emit(f"{index}. 等待识别：{step.name}（模板：{template_path.name}）")
-            match, (screen_x, screen_y) = wait_click_template(
-                hwnd,
-                template_path,
-                threshold=template_threshold,
-                timeout=timeout_seconds,
-            )
+        if use_templates and candidates:
+            emit(f"{index}. 等待识别：{step.name}（同步识别上班/下班模板）")
+            matched_mode, matched_step, matched_path, match, _best_seen = wait_best_template(candidates, timeout_seconds)
             relative_x, relative_y = match.center_relative
+            screen_x, screen_y = click_scrcpy_relative(hwnd, relative_x, relative_y)
             message = (
-                f"{index}. {step.name}：识别相似度={match.score:.3f} "
+                f"{index}. {matched_step.name}：模式={matched_mode}，识别相似度={match.score:.3f} "
                 f"相对坐标={relative_x:.3f},{relative_y:.3f} 屏幕坐标={screen_x},{screen_y}"
             )
             details = {
                 "index": index,
                 "mode": mode,
+                "matched_mode": matched_mode,
                 "action": step.action,
-                "template": str(template_path),
+                "template": str(matched_path),
                 "score": match.score,
                 "relative": [relative_x, relative_y],
                 "screen": [screen_x, screen_y],
@@ -224,6 +307,8 @@ def run_offwork_sequence(
         if started_scrcpy and not keep_scrcpy:
             close_window(hwnd)
             emit("已关闭本次脚本启动的 scrcpy 窗口")
+        restore_sleep()
+        emit("已恢复 Windows 睡眠策略")
 
     finish_device()
     mark_completed(sequence["completed"])

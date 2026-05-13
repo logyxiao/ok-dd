@@ -112,7 +112,7 @@ def main() -> int:
             mode=mode,
         )
     except Exception as exception:
-        mark_failed(str(exception))
+        mark_failed(str(exception), action_name)
         raise
 
     return 0

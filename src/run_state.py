@@ -54,13 +54,13 @@ def mark_completed(message: str = "已完成") -> None:
     append_action("下班打卡序列", "成功", message)
 
 
-def mark_failed(message: str) -> None:
+def mark_failed(message: str, event: str = "下班打卡序列") -> None:
     state = load_state()
     state["last_failed_at"] = now_text()
     state["last_status"] = "失败"
     state["last_message"] = message
     save_state(state)
-    append_action("下班打卡序列", "失败", message)
+    append_action(event, "失败", message)
 
 
 def completed_today() -> bool:

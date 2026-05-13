@@ -35,7 +35,7 @@ def load_template(path: Path) -> np.ndarray:
     return template
 
 
-def find_template(frame: np.ndarray, template: np.ndarray, threshold: float = 0.86) -> TemplateMatch | None:
+def best_template_match(frame: np.ndarray, template: np.ndarray) -> TemplateMatch | None:
     if frame.shape[0] < template.shape[0] or frame.shape[1] < template.shape[1]:
         return None
 
@@ -43,8 +43,6 @@ def find_template(frame: np.ndarray, template: np.ndarray, threshold: float = 0.
     template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
     result = cv2.matchTemplate(frame_gray, template_gray, cv2.TM_CCOEFF_NORMED)
     _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
-    if max_val < threshold:
-        return None
     height, width = template_gray.shape[:2]
     frame_height, frame_width = frame_gray.shape[:2]
     return TemplateMatch(
@@ -56,6 +54,13 @@ def find_template(frame: np.ndarray, template: np.ndarray, threshold: float = 0.
         frame_width=frame_width,
         frame_height=frame_height,
     )
+
+
+def find_template(frame: np.ndarray, template: np.ndarray, threshold: float = 0.86) -> TemplateMatch | None:
+    match = best_template_match(frame, template)
+    if not match or match.score < threshold:
+        return None
+    return match
 
 
 def wait_template(

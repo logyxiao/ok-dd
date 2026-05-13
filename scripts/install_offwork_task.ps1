@@ -25,7 +25,7 @@ $MorningTrigger = New-ScheduledTaskTrigger -Daily -At (Get-TriggerTime $MorningT
 $EveningTrigger = New-ScheduledTaskTrigger -Daily -At (Get-TriggerTime $EveningTime $RandomWindowMinutes)
 $MorningTrigger.RandomDelay = "PT$($RandomDelayMinutes)M"
 $EveningTrigger.RandomDelay = "PT$($RandomDelayMinutes)M"
-$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -WakeToRun
 
 Register-ScheduledTask `
     -TaskName $MorningTaskName `

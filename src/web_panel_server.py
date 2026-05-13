@@ -522,7 +522,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
                     f"$Action=New-ScheduledTaskAction -Execute {ps_quote(execute)} -Argument {ps_quote(arguments)} -WorkingDirectory {ps_quote(str(ROOT))}",
                     f"$Trigger=New-ScheduledTaskTrigger -Daily -At {ps_quote(trigger_time)}",
                     f"$Trigger.RandomDelay={ps_quote(random_delay_iso)}",
-                    "$Settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+                    "$Settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -WakeToRun",
                     f"Register-ScheduledTask -TaskName {ps_quote(task_name)} -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null",
                     f"Write-Output {ps_quote('已注册计划任务：' + task_name + '，触发时间：' + trigger_time + '，Windows随机延迟：' + random_delay_iso)}",
                 ]
