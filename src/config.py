@@ -23,7 +23,7 @@ schedule_option = ConfigOption(
         "Random Window Minutes": 5,
         "Workday Only": True,
     },
-    description="Windows scheduled task settings",
+    description="scheduled task settings",
 )
 
 config = {

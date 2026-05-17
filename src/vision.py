@@ -19,6 +19,7 @@ class TemplateMatch:
     height: int
     frame_width: int
     frame_height: int
+    scale: float = 1.0
 
     @property
     def center_relative(self) -> tuple[float, float]:
@@ -35,25 +36,76 @@ def load_template(path: Path) -> np.ndarray:
     return template
 
 
-def best_template_match(frame: np.ndarray, template: np.ndarray) -> TemplateMatch | None:
-    if frame.shape[0] < template.shape[0] or frame.shape[1] < template.shape[1]:
-        return None
-
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-    result = cv2.matchTemplate(frame_gray, template_gray, cv2.TM_CCOEFF_NORMED)
-    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
-    height, width = template_gray.shape[:2]
-    frame_height, frame_width = frame_gray.shape[:2]
-    return TemplateMatch(
-        score=float(max_val),
-        x=int(max_loc[0]),
-        y=int(max_loc[1]),
-        width=width,
-        height=height,
-        frame_width=frame_width,
-        frame_height=frame_height,
+def template_scales() -> tuple[float, ...]:
+    return (
+        0.40,
+        0.45,
+        0.50,
+        0.55,
+        0.60,
+        0.65,
+        0.70,
+        0.75,
+        0.80,
+        0.85,
+        0.90,
+        0.95,
+        1.00,
+        1.05,
+        1.10,
+        1.15,
+        1.20,
+        1.25,
+        1.30,
+        1.35,
+        1.40,
+        1.50,
+        1.60,
+        1.70,
+        1.80,
+        1.90,
+        2.00,
     )
+
+
+def resize_template(template: np.ndarray, scale: float) -> np.ndarray | None:
+    if scale == 1.0:
+        return template
+    height, width = template.shape[:2]
+    resized_width = max(1, int(width * scale))
+    resized_height = max(1, int(height * scale))
+    if resized_width < 4 or resized_height < 4:
+        return None
+    return cv2.resize(template, (resized_width, resized_height), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+
+
+def best_template_match(frame: np.ndarray, template: np.ndarray) -> TemplateMatch | None:
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    frame_height, frame_width = frame_gray.shape[:2]
+    best: TemplateMatch | None = None
+    for scale in template_scales():
+        scaled_template = resize_template(template, scale)
+        if scaled_template is None:
+            continue
+        template_height, template_width = scaled_template.shape[:2]
+        if frame_height < template_height or frame_width < template_width:
+            continue
+        template_gray = cv2.cvtColor(scaled_template, cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(frame_gray, template_gray, cv2.TM_CCOEFF_NORMED)
+        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
+        match = TemplateMatch(
+            score=float(max_val),
+            x=int(max_loc[0]),
+            y=int(max_loc[1]),
+            width=template_width,
+            height=template_height,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            scale=scale,
+        )
+        if best is None or match.score > best.score:
+            best = match
+    return best
 
 
 def find_template(frame: np.ndarray, template: np.ndarray, threshold: float = 0.86) -> TemplateMatch | None:
@@ -75,15 +127,11 @@ def wait_template(
     best_score = 0.0
     while time.monotonic() < deadline:
         frame = capture_window(hwnd)
-        match = find_template(frame, template, threshold=threshold)
+        match = best_template_match(frame, template)
         if match:
+            best_score = max(best_score, match.score)
+        if match and match.score >= threshold:
             return match
-        raw = cv2.matchTemplate(
-            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
-            cv2.cvtColor(template, cv2.COLOR_BGR2GRAY),
-            cv2.TM_CCOEFF_NORMED,
-        )
-        best_score = max(best_score, float(cv2.minMaxLoc(raw)[1]))
         time.sleep(interval)
     raise TimeoutError(f"等待模板出现超时：{template_path}，最佳相似度：{best_score:.3f}")
 

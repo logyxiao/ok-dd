@@ -11,11 +11,28 @@
 
 ## 环境
 
-本项目面向 Windows，并要求：
+本项目支持 Windows 和 macOS，并要求：
 
 - Python 3.12
 - `scrcpy` 可在命令行直接执行
 - Android 设备已通过 USB 或 ADB 连接，且 `adb devices` 能看到设备
+
+macOS 推荐使用 Homebrew 安装 Python 3.12、ADB 和 scrcpy：
+
+```bash
+brew install python@3.12 android-platform-tools scrcpy
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+如果你的 `python3` 仍指向 macOS 自带的 3.9，可以改用：
+
+```bash
+/opt/homebrew/bin/python3.12 -m venv .venv
+```
+
+macOS 上默认安装 Web 面板和 ADB 自动化所需依赖；`ok-script` 主 GUI 依赖 Windows 专用的 `pywin32`，仅在 Windows 安装。
 
 安装依赖：
 
@@ -162,7 +179,7 @@ GUI 支持：
 1. 左侧 Tab 菜单切换仪表盘、执行控制、自动计划、操作日志。
 2. 查看今天是否已经成功执行。
 3. 查看今天是否是中国工作日，以及今天自动任务会执行还是跳过。
-4. 查看 Windows 计划任务的下次自动执行时间、上次运行时间和结果。
+4. 查看自动计划的下次执行时间、上次运行时间和结果。
 5. 点击“立即执行”手动运行下班打卡脚本。
 6. 点击“只检查今天”进行 dry-run。
 7. 设置早上和晚上两个自动执行时间，并安装/更新计划任务。
@@ -170,6 +187,15 @@ GUI 支持：
 9. 打开日志目录和截图目录。
 10. 查看最近执行日志和实时命令输出。
 ```
+
+macOS 上的计划任务由 `launchd` 实现，面板会写入：
+
+```text
+~/Library/LaunchAgents/com.ok-dingtalk.morning.plist
+~/Library/LaunchAgents/com.ok-dingtalk.evening.plist
+```
+
+Windows 上仍使用“计划任务”。macOS 上截图和点击通过 ADB 直接操作手机屏幕，不依赖 Windows 窗口句柄。
 
 执行状态和日志保存在：
 
@@ -321,6 +347,12 @@ powershell -ExecutionPolicy Bypass -File scripts\install_offwork_task.ps1 -Morni
 ```
 
 计划任务每天运行两次，是否真正点击由脚本内的 `--workday-only` 判断决定。这样能覆盖普通周末、法定节假日，以及调休上班的周六/周日。
+
+macOS 上可以直接在 Web 面板安装自动计划；也可以手动运行一次验证：
+
+```bash
+python scripts/dingtalk_offwork_sequence.py --workday-only --mode evening
+```
 
 ## ok-script 调试入口
 

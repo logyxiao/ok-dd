@@ -18,10 +18,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import cv2
 
+from src.adb import get_device_lock_state, launch_package, wake_and_unlock_if_possible
 from src.run_state import LOG_DIR, completed_today, load_state, read_recent_actions
 from src.paths import app_root, resource_path
 from src.scrcpy import capture_window, close_window, ensure_any_scrcpy_window
-from src.vision import find_template, load_template, wait_click_template, wait_template
+from src.vision import best_template_match, find_template, load_template, wait_click_template, wait_template
 from src.workday import describe_china_workday, is_china_workday
 
 ROOT = app_root()
@@ -70,8 +71,18 @@ TEMPLATE_STEPS = {
         "action": "verify",
     },
 }
+TEST_STEP_ORDER = {
+    "morning": ["morning.work_notice", "morning.clock_button", "morning.field_clock_button", "morning.success_text"],
+    "evening": ["evening.work_notice", "evening.offwork_button", "evening.field_offwork_button", "evening.success_text"],
+}
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 DEFAULT_PORT = 8765
+IS_MACOS = sys.platform == "darwin"
+LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LAUNCHD_LABELS = {
+    "morning": "com.ok-dingtalk.morning",
+    "evening": "com.ok-dingtalk.evening",
+}
 
 
 def is_frozen() -> bool:
@@ -123,6 +134,16 @@ def powershell(command: str, timeout: int = 15) -> subprocess.CompletedProcess:
         capture_output=True,
         timeout=timeout,
         creationflags=CREATE_NO_WINDOW,
+    )
+
+
+def launchctl(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["launchctl", *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
     )
 
 
@@ -188,6 +209,9 @@ def get_single_task_info(task_name: str) -> dict:
 
 
 def get_task_info() -> dict:
+    if IS_MACOS:
+        return get_macos_task_info()
+
     tasks = {}
     for key, meta in TASKS.items():
         info = get_single_task_info(meta["name"])
@@ -210,6 +234,107 @@ def get_task_info() -> dict:
         "last_result": "",
         "tasks": tasks,
     }
+
+
+def plist_path(key: str) -> Path:
+    return LAUNCH_AGENTS_DIR / f"{LAUNCHD_LABELS[key]}.plist"
+
+
+def read_launchd_plist(key: str) -> dict:
+    path = plist_path(key)
+    if not path.exists():
+        return {}
+    try:
+        import plistlib
+
+        with path.open("rb") as file:
+            return plistlib.load(file)
+    except Exception:
+        return {}
+
+
+def get_macos_task_info() -> dict:
+    schedule = load_schedule_config()
+    tasks = {}
+    for key, meta in TASKS.items():
+        path = plist_path(key)
+        plist = read_launchd_plist(key)
+        installed = path.exists()
+        start_calendar = plist.get("StartCalendarInterval") if plist else {}
+        target_time = schedule.get(f"{key}_time") or (
+            f"{int(start_calendar.get('Hour', 0)):02d}:{int(start_calendar.get('Minute', 0)):02d}"
+            if isinstance(start_calendar, dict) and start_calendar
+            else ""
+        )
+        tasks[key] = {
+            "name": meta["name"],
+            "label": meta["label"],
+            "installed": installed,
+            "enabled": installed,
+            "state": "Ready" if installed else "Missing",
+            "next_run": next_target_run(target_time) if target_time else "",
+            "last_run": "",
+            "last_result": "",
+            "trigger_time": target_time,
+            "target_time": target_time,
+            "random_delay": "",
+            "random_delay_minutes": schedule.get("random_window_minutes", 0) * 2 if schedule else 0,
+        }
+    installed_tasks = [task for task in tasks.values() if task.get("installed")]
+    next_runs = [task.get("next_run", "") for task in installed_tasks if task.get("next_run")]
+    return {
+        "installed": bool(installed_tasks),
+        "all_installed": len(installed_tasks) == len(TASKS),
+        "enabled": bool(installed_tasks),
+        "state": "Ready" if installed_tasks else "Missing",
+        "next_run": min(next_runs) if next_runs else "",
+        "last_run": "",
+        "last_result": "",
+        "tasks": tasks,
+    }
+
+
+def write_macos_plist(
+    key: str,
+    target_time: str,
+    workday_only: bool,
+    random_delay_minutes: int,
+) -> Path:
+    import plistlib
+
+    parsed = parse_hhmm(target_time)
+    command = automation_command(
+        workday_only=workday_only,
+        random_delay_minutes=random_delay_minutes,
+        mode=key,
+    )
+    label = LAUNCHD_LABELS[key]
+    path = plist_path(key)
+    log_path = LOG_DIR / f"{key}_launchd.log"
+    error_log_path = LOG_DIR / f"{key}_launchd_error.log"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "Label": label,
+        "ProgramArguments": command,
+        "WorkingDirectory": str(ROOT),
+        "EnvironmentVariables": automation_env(),
+        "StartCalendarInterval": {"Hour": parsed.hour, "Minute": parsed.minute},
+        "StandardOutPath": str(log_path),
+        "StandardErrorPath": str(error_log_path),
+    }
+    with path.open("wb") as file:
+        plistlib.dump(payload, file)
+    return path
+
+
+def load_macos_plist(path: Path) -> subprocess.CompletedProcess:
+    launchctl(["bootout", f"gui/{os.getuid()}", str(path)], timeout=15)
+    return launchctl(["bootstrap", f"gui/{os.getuid()}", str(path)], timeout=15)
+
+
+def unload_macos_plist(path: Path) -> subprocess.CompletedProcess:
+    return launchctl(["bootout", f"gui/{os.getuid()}", str(path)], timeout=15)
 
 
 def parse_hhmm(value: str) -> datetime:
@@ -306,6 +431,33 @@ def get_template_info() -> list[dict]:
     return [template_payload(key) for key in TEMPLATE_STEPS]
 
 
+def get_test_steps() -> dict:
+    return {
+        mode: [
+            {
+                **template_payload(key),
+                "index": index,
+            }
+            for index, key in enumerate(keys, start=1)
+        ]
+        for mode, keys in TEST_STEP_ORDER.items()
+    }
+
+
+def no_template_payload(key: str, match) -> dict:
+    payload = {"ok": False, "message": "未识别到模板", "template": template_payload(key)}
+    if match:
+        payload.update(
+            {
+                "best_score": match.score,
+                "scale": match.scale,
+                "relative": list(match.center_relative),
+                "box": {"x": match.x, "y": match.y, "width": match.width, "height": match.height},
+            }
+        )
+    return payload
+
+
 def parse_multipart(raw: bytes, boundary: bytes) -> dict[str, bytes]:
     fields: dict[str, bytes] = {}
     for part in raw.split(boundary):
@@ -363,6 +515,9 @@ class ProcessState:
             self.output = [f"执行命令：{subprocess.list2cmdline(command)}\n"]
             self.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.last_exit_code = None
+            popen_kwargs = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = CREATE_NO_WINDOW
             self.process = subprocess.Popen(
                 command,
                 cwd=ROOT,
@@ -372,7 +527,7 @@ class ProcessState:
                 stderr=subprocess.STDOUT,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=CREATE_NO_WINDOW,
+                **popen_kwargs,
             )
             process = self.process
 
@@ -414,6 +569,9 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/process":
             self.send_json(PROCESS_STATE.snapshot())
+            return
+        if parsed.path == "/api/test-steps":
+            self.send_json({"ok": True, "steps": get_test_steps()})
             return
         if parsed.path == "/api/open":
             target = parse_qs(parsed.query).get("target", [""])[0]
@@ -469,6 +627,9 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/click-template":
             self.with_json_errors(lambda: self.click_template(payload))
             return
+        if parsed.path == "/api/test-step-action":
+            self.with_json_errors(lambda: self.test_step_action(payload))
+            return
         if parsed.path == "/api/shutdown":
             self.send_json({"ok": True})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -487,6 +648,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             },
             "task": get_task_info(),
             "templates": get_template_info(),
+            "test_steps": get_test_steps(),
             "logs": logs,
             "process": PROCESS_STATE.snapshot(),
         }
@@ -507,6 +669,10 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         workday_only = bool(payload.get("workday_only", True))
         random_window_minutes = int(payload.get("random_window_minutes") or 5)
         random_delay_minutes = random_window_minutes * 2
+        if IS_MACOS:
+            self.install_macos_task(morning_time, evening_time, workday_only, random_window_minutes, random_delay_minutes)
+            return
+
         outputs = []
         ok = True
         for key, target_time in {"morning": morning_time, "evening": evening_time}.items():
@@ -542,7 +708,54 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def install_macos_task(
+        self,
+        morning_time: str,
+        evening_time: str,
+        workday_only: bool,
+        random_window_minutes: int,
+        random_delay_minutes: int,
+    ) -> None:
+        outputs = []
+        ok = True
+        for key, target_time in {"morning": morning_time, "evening": evening_time}.items():
+            task_name = TASKS[key]["name"]
+            try:
+                path = write_macos_plist(key, target_time, workday_only, random_delay_minutes)
+                result = load_macos_plist(path)
+                outputs.append({"task": task_name, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+                ok = ok and result.returncode == 0
+            except Exception as exc:
+                outputs.append({"task": task_name, "ok": False, "stdout": "", "stderr": str(exc)})
+                ok = False
+        if ok:
+            save_schedule_config(morning_time, evening_time, random_window_minutes, workday_only)
+        self.send_json(
+            {
+                "ok": ok,
+                "stdout": "\n".join(item["stdout"] for item in outputs),
+                "stderr": "\n".join(item["stderr"] for item in outputs),
+                "outputs": outputs,
+                "task": get_task_info(),
+            }
+        )
+
     def delete_task(self) -> None:
+        if IS_MACOS:
+            outputs = []
+            ok = True
+            for key, meta in TASKS.items():
+                path = plist_path(key)
+                result = unload_macos_plist(path) if path.exists() else subprocess.CompletedProcess([], 0, "", "")
+                if path.exists():
+                    path.unlink()
+                outputs.append({"task": meta["name"], "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+                ok = ok and result.returncode == 0
+            if ok and SCHEDULE_FILE.exists():
+                SCHEDULE_FILE.unlink()
+            self.send_json({"ok": ok, "outputs": outputs, "task": get_task_info()})
+            return
+
         outputs = []
         ok = True
         for task_name in [meta["name"] for meta in TASKS.values()] + LEGACY_TASK_NAMES:
@@ -560,6 +773,21 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": ok, "outputs": outputs, "task": get_task_info()})
 
     def set_task_enabled(self, enabled: bool) -> None:
+        if IS_MACOS:
+            outputs = []
+            ok = True
+            for key, meta in TASKS.items():
+                path = plist_path(key)
+                if not path.exists():
+                    outputs.append({"task": meta["name"], "ok": False, "stdout": "", "stderr": "launchd plist 不存在"})
+                    ok = False
+                    continue
+                result = load_macos_plist(path) if enabled else unload_macos_plist(path)
+                outputs.append({"task": meta["name"], "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+                ok = ok and result.returncode == 0
+            self.send_json({"ok": ok, "outputs": outputs, "task": get_task_info()})
+            return
+
         action = "/Enable" if enabled else "/Disable"
         outputs = []
         ok = True
@@ -592,7 +820,12 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "message": "未知目标目录"}, status=HTTPStatus.BAD_REQUEST)
             return
         path.mkdir(parents=True, exist_ok=True)
-        os.startfile(path)
+        if os.name == "nt":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
         self.send_json({"ok": True})
 
     def upload_template(self) -> None:
@@ -662,9 +895,10 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         hwnd, started = ensure_any_scrcpy_window(timeout=20)
         try:
             frame = capture_window(hwnd)
-            match = find_template(frame, load_template(path), threshold=threshold)
-            if not match:
-                self.send_json({"ok": False, "message": "未识别到模板", "template": template_payload(key)})
+            template = load_template(path)
+            match = best_template_match(frame, template)
+            if not match or match.score < threshold:
+                self.send_json(no_template_payload(key, match))
                 return
             relative_x, relative_y = match.center_relative
             self.send_json(
@@ -672,6 +906,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "message": "已识别到模板",
                     "score": match.score,
+                    "scale": match.scale,
                     "relative": [relative_x, relative_y],
                     "box": {"x": match.x, "y": match.y, "width": match.width, "height": match.height},
                     "template": template_payload(key),
@@ -702,6 +937,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "message": "已识别到确认模板",
                         "score": match.score,
+                        "scale": match.scale,
                         "relative": [relative_x, relative_y],
                         "template": template_payload(key),
                     }
@@ -714,11 +950,130 @@ class WebPanelHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "message": "已识别并点击模板",
                     "score": match.score,
+                    "scale": match.scale,
                     "relative": [relative_x, relative_y],
                     "screen": [clicked_at[0], clicked_at[1]],
                     "template": template_payload(key),
                 }
             )
+        finally:
+            if started:
+                pass
+
+    def test_step_action(self, payload: dict) -> None:
+        action = str(payload.get("action") or "")
+        mode = str(payload.get("mode") or "evening")
+        if mode not in TEST_STEP_ORDER:
+            self.send_json({"ok": False, "message": "未知打卡模式"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if action == "open-dingtalk":
+            package = str(payload.get("package") or "com.alibaba.android.rimet")
+            fresh = bool(payload.get("fresh", True))
+            wait_seconds = float(payload.get("wait_seconds") or 4)
+            launch_package(package, wait_seconds=wait_seconds, fresh=fresh)
+            self.send_json({"ok": True, "message": "已打开钉钉"})
+            return
+
+        if action == "check-unlock":
+            before = get_device_lock_state()
+            after = wake_and_unlock_if_possible()
+            self.send_json(
+                {
+                    "ok": True,
+                    "message": f"检查完成：{after.description}",
+                    "before": before.description,
+                    "after": after.description,
+                    "screen_on": after.screen_on,
+                    "locked": after.locked,
+                    "manual_required": after.locked is True,
+                }
+            )
+            return
+
+        key = str(payload.get("key") or "")
+        if key not in TEMPLATE_STEPS or key not in TEST_STEP_ORDER[mode]:
+            self.send_json({"ok": False, "message": "未知测试步骤"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        threshold = float(payload.get("threshold") or 0.86)
+        timeout = float(payload.get("timeout") or 25)
+        path = template_path(key)
+        if not path.exists():
+            self.send_json({"ok": False, "message": "模板图片不存在"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        hwnd, started = ensure_any_scrcpy_window(timeout=20)
+        try:
+            if action == "capture":
+                frame = capture_window(hwnd)
+                SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(CURRENT_SCREENSHOT), frame):
+                    raise RuntimeError("保存截图失败")
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": "已截图当前页面",
+                        "url": f"/api/screenshot-file?t={int(CURRENT_SCREENSHOT.stat().st_mtime)}",
+                        "width": int(frame.shape[1]),
+                        "height": int(frame.shape[0]),
+                        "scrcpy_started": started,
+                    }
+                )
+                return
+
+            if action == "test":
+                frame = capture_window(hwnd)
+                template = load_template(path)
+                match = best_template_match(frame, template)
+                if not match or match.score < threshold:
+                    self.send_json(no_template_payload(key, match))
+                    return
+                relative_x, relative_y = match.center_relative
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": "已识别到模板",
+                        "score": match.score,
+                        "scale": match.scale,
+                        "relative": [relative_x, relative_y],
+                        "box": {"x": match.x, "y": match.y, "width": match.width, "height": match.height},
+                        "template": template_payload(key),
+                    }
+                )
+                return
+
+            if action == "click":
+                if TEMPLATE_STEPS[key].get("action") == "verify":
+                    match = wait_template(hwnd, path, threshold=threshold, timeout=timeout)
+                    relative_x, relative_y = match.center_relative
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": "已识别到确认模板",
+                            "score": match.score,
+                            "scale": match.scale,
+                            "relative": [relative_x, relative_y],
+                            "template": template_payload(key),
+                        }
+                    )
+                    return
+                match, clicked_at = wait_click_template(hwnd, path, threshold=threshold, timeout=timeout)
+                relative_x, relative_y = match.center_relative
+                self.send_json(
+                    {
+                        "ok": True,
+                        "message": "已识别并点击模板",
+                        "score": match.score,
+                        "scale": match.scale,
+                        "relative": [relative_x, relative_y],
+                        "screen": [clicked_at[0], clicked_at[1]],
+                        "template": template_payload(key),
+                    }
+                )
+                return
+
+            self.send_json({"ok": False, "message": "未知测试动作"}, status=HTTPStatus.BAD_REQUEST)
         finally:
             if started:
                 pass

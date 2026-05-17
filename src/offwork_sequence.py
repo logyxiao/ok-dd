@@ -8,7 +8,7 @@ from typing import Callable
 
 import cv2
 
-from src.adb import force_stop_package, launch_package, lock_screen
+from src.adb import force_stop_package, launch_package, lock_screen, wake_and_unlock_if_possible
 from src.power import keep_system_awake, restore_sleep, wake_display
 from src.run_state import append_action, mark_completed
 from src.paths import app_root, resource_path
@@ -99,7 +99,11 @@ def run_offwork_sequence(
     steps = sequence["steps"]
     keep_system_awake()
     wake_display()
-    emit("已请求 Windows 保持唤醒并唤醒显示器")
+    emit("已请求系统保持唤醒")
+    device_state = wake_and_unlock_if_possible()
+    emit(f"手机屏幕状态：{device_state.description}")
+    if device_state.locked:
+        raise RuntimeError("手机仍处于锁屏状态，请先手动解锁后再执行")
 
     if open_dingtalk:
         emit("打开钉钉")
@@ -197,7 +201,7 @@ def run_offwork_sequence(
             relative_x, relative_y = match.center_relative
             message = (
                 f"{index}. {matched_step.name}：已识别成功文字，模式={matched_mode}，相似度={match.score:.3f} "
-                f"相对坐标={relative_x:.3f},{relative_y:.3f}"
+                f"缩放={match.scale:.2f} 相对坐标={relative_x:.3f},{relative_y:.3f}"
             )
             details = {
                 "index": index,
@@ -206,6 +210,7 @@ def run_offwork_sequence(
                 "action": step.action,
                 "template": str(matched_path),
                 "score": match.score,
+                "scale": match.scale,
                 "relative": [relative_x, relative_y],
             }
             return message, details
@@ -217,7 +222,7 @@ def run_offwork_sequence(
             screen_x, screen_y = click_scrcpy_relative(hwnd, relative_x, relative_y)
             message = (
                 f"{index}. {matched_step.name}：模式={matched_mode}，识别相似度={match.score:.3f} "
-                f"相对坐标={relative_x:.3f},{relative_y:.3f} 屏幕坐标={screen_x},{screen_y}"
+                f"缩放={match.scale:.2f} 相对坐标={relative_x:.3f},{relative_y:.3f} 屏幕坐标={screen_x},{screen_y}"
             )
             details = {
                 "index": index,
@@ -226,6 +231,7 @@ def run_offwork_sequence(
                 "action": step.action,
                 "template": str(matched_path),
                 "score": match.score,
+                "scale": match.scale,
                 "relative": [relative_x, relative_y],
                 "screen": [screen_x, screen_y],
             }
@@ -262,7 +268,7 @@ def run_offwork_sequence(
         message = (
             f"{index}. 容错重试：仍识别到上一步并已重新点击，"
             f"上一步={previous_step.name}，相似度={match.score:.3f}，"
-            f"相对坐标={relative_x:.3f},{relative_y:.3f} 屏幕坐标={screen_x},{screen_y}"
+            f"缩放={match.scale:.2f} 相对坐标={relative_x:.3f},{relative_y:.3f} 屏幕坐标={screen_x},{screen_y}"
         )
         emit(message)
         append_action(
@@ -276,6 +282,7 @@ def run_offwork_sequence(
                 "previous_step": previous_step.name,
                 "template": str(previous_template_path),
                 "score": match.score,
+                "scale": match.scale,
                 "relative": [relative_x, relative_y],
                 "screen": [screen_x, screen_y],
             },
@@ -308,7 +315,7 @@ def run_offwork_sequence(
             close_window(hwnd)
             emit("已关闭本次脚本启动的 scrcpy 窗口")
         restore_sleep()
-        emit("已恢复 Windows 睡眠策略")
+        emit("已恢复系统睡眠策略")
 
     finish_device()
     mark_completed(sequence["completed"])

@@ -1,41 +1,52 @@
 from __future__ import annotations
 
-import ctypes
+import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import cv2
 import numpy as np
 import psutil
-import win32con
-import win32api
-import win32gui
-import win32process
-import win32ui
+
+IS_WINDOWS = os.name == "nt"
+
+if IS_WINDOWS:
+    import ctypes
+    import win32api
+    import win32con
+    import win32gui
+    import win32process
+    import win32ui
 
 
-def _enable_dpi_awareness() -> None:
-    try:
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-        return
-    except Exception:
-        pass
+    def _enable_dpi_awareness() -> None:
+        try:
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            return
+        except Exception:
+            pass
 
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return
-    except Exception:
-        pass
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            return
+        except Exception:
+            pass
 
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
-_enable_dpi_awareness()
+    _enable_dpi_awareness()
+
+
+@dataclass
+class ScrcpySession:
+    process: subprocess.Popen | None = None
 
 
 def build_scrcpy_command(title: str, extra_args: Iterable[str] | None = None) -> list[str]:
@@ -46,15 +57,21 @@ def build_scrcpy_command(title: str, extra_args: Iterable[str] | None = None) ->
 
 
 def start_scrcpy(title: str, extra_args: Iterable[str] | None = None) -> subprocess.Popen:
-    return subprocess.Popen(
-        build_scrcpy_command(title, extra_args),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(build_scrcpy_command(title, extra_args), **kwargs)
 
 
-def find_window_by_title(title: str) -> int | None:
+def find_window_by_title(title: str) -> int | ScrcpySession | None:
+    if not IS_WINDOWS:
+        return find_scrcpy_window()
+
     title_lower = title.lower()
     matched: list[int] = []
 
@@ -71,6 +88,14 @@ def find_window_by_title(title: str) -> int | None:
 
 
 def list_visible_windows() -> list[tuple[int, str]]:
+    if not IS_WINDOWS:
+        windows = []
+        for process in psutil.process_iter(["pid", "name"]):
+            name = (process.info.get("name") or "").lower()
+            if name == "scrcpy":
+                windows.append((int(process.info["pid"]), "scrcpy"))
+        return windows
+
     windows: list[tuple[int, str]] = []
 
     def callback(hwnd: int, _lparam: object) -> bool:
@@ -85,6 +110,8 @@ def list_visible_windows() -> list[tuple[int, str]]:
 
 
 def get_window_pid(hwnd: int) -> int:
+    if not IS_WINDOWS:
+        return int(hwnd)
     _thread_id, pid = win32process.GetWindowThreadProcessId(hwnd)
     return pid
 
@@ -97,7 +124,13 @@ def get_window_process_name(hwnd: int) -> str:
         return str(pid)
 
 
-def find_scrcpy_window() -> int | None:
+def find_scrcpy_window() -> int | ScrcpySession | None:
+    if not IS_WINDOWS:
+        for process in psutil.process_iter(["name"]):
+            if (process.info.get("name") or "").lower() == "scrcpy":
+                return ScrcpySession()
+        return None
+
     for hwnd, _title in list_visible_windows():
         process_name = get_window_process_name(hwnd).lower()
         if process_name == "scrcpy.exe":
@@ -105,7 +138,7 @@ def find_scrcpy_window() -> int | None:
     return None
 
 
-def wait_for_window(title: str, timeout: float = 20) -> int:
+def wait_for_window(title: str, timeout: float = 20) -> int | ScrcpySession:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         hwnd = find_window_by_title(title)
@@ -123,11 +156,16 @@ def ensure_scrcpy_window(
     title: str = "OK Scrcpy Daily",
     extra_args: Iterable[str] | None = None,
     timeout: float = 20,
-) -> int:
+) -> int | ScrcpySession:
     hwnd = find_window_by_title(title)
     if hwnd:
         return hwnd
-    start_scrcpy(title, extra_args)
+    process = start_scrcpy(title, extra_args)
+    if not IS_WINDOWS:
+        time.sleep(1)
+        if process.poll() is not None:
+            raise RuntimeError(f"scrcpy 提前退出，退出码：{process.returncode}")
+        return ScrcpySession(process)
     return wait_for_window(title, timeout)
 
 
@@ -135,12 +173,18 @@ def ensure_any_scrcpy_window(
     title: str = "OK Scrcpy Daily",
     extra_args: Iterable[str] | None = None,
     timeout: float = 20,
-) -> tuple[int, bool]:
+) -> tuple[int | ScrcpySession, bool]:
     hwnd = find_scrcpy_window()
     if hwnd:
         return hwnd, False
 
     process = start_scrcpy(title, extra_args)
+    if not IS_WINDOWS:
+        time.sleep(1)
+        if process.poll() is not None:
+            raise RuntimeError(f"scrcpy 提前退出，退出码：{process.returncode}")
+        return ScrcpySession(process), True
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         hwnd = find_window_by_title(title) or find_scrcpy_window()
@@ -157,12 +201,20 @@ def ensure_any_scrcpy_window(
     )
 
 
-def close_window(hwnd: int) -> None:
+def close_window(hwnd: int | ScrcpySession) -> None:
+    if not IS_WINDOWS:
+        if isinstance(hwnd, ScrcpySession) and hwnd.process and hwnd.process.poll() is None:
+            hwnd.process.terminate()
+        return
+
     if win32gui.IsWindow(hwnd):
         win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
 
 
-def _client_rect_size(hwnd: int) -> tuple[int, int]:
+def _client_rect_size(hwnd: int | ScrcpySession) -> tuple[int, int]:
+    if not IS_WINDOWS:
+        return adb_screen_size()
+
     left, top, right, bottom = win32gui.GetClientRect(hwnd)
     width = right - left
     height = bottom - top
@@ -171,7 +223,42 @@ def _client_rect_size(hwnd: int) -> tuple[int, int]:
     return width, height
 
 
-def capture_window(hwnd: int) -> np.ndarray:
+def adb_screen_size() -> tuple[int, int]:
+    result = subprocess.run(
+        ["adb", "shell", "wm", "size"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"读取设备分辨率失败：{result.stderr.strip() or result.stdout.strip()}")
+    text = result.stdout.strip()
+    for token in text.replace("\r", " ").replace("\n", " ").split():
+        if "x" in token:
+            left, right = token.lower().split("x", 1)
+            if left.isdigit() and right.isdigit():
+                return int(left), int(right)
+    raise RuntimeError(f"无法解析设备分辨率：{text}")
+
+
+def capture_adb_screen() -> np.ndarray:
+    result = subprocess.run(["adb", "exec-out", "screencap", "-p"], capture_output=True, timeout=15)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ADB 截图失败：{stderr}")
+    image = np.frombuffer(result.stdout, dtype=np.uint8)
+    frame = cv2.imdecode(image, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise RuntimeError("ADB 截图无法解码")
+    return frame
+
+
+def capture_window(hwnd: int | ScrcpySession) -> np.ndarray:
+    if not IS_WINDOWS:
+        return capture_adb_screen()
+
     width, height = _client_rect_size(hwnd)
     hwnd_dc = win32gui.GetDC(hwnd)
     src_dc = win32ui.CreateDCFromHandle(hwnd_dc)
@@ -213,10 +300,23 @@ def crop_relative_box(frame: np.ndarray, box: Sequence[float]) -> np.ndarray:
     return frame[y : y + height, x : x + width]
 
 
-def click_scrcpy_relative(hwnd: int, x: float, y: float) -> tuple[int, int]:
+def click_scrcpy_relative(hwnd: int | ScrcpySession, x: float, y: float) -> tuple[int, int]:
     width, height = _client_rect_size(hwnd)
     client_x = max(0, min(width - 1, int(width * x)))
     client_y = max(0, min(height - 1, int(height * y)))
+    if not IS_WINDOWS:
+        result = subprocess.run(
+            ["adb", "shell", "input", "tap", str(client_x), str(client_y)],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ADB 点击失败：{result.stderr.strip() or result.stdout.strip()}")
+        return client_x, client_y
+
     screen_x, screen_y = win32gui.ClientToScreen(hwnd, (client_x, client_y))
     try:
         win32gui.SetForegroundWindow(hwnd)

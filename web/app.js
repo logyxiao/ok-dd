@@ -1,4 +1,4 @@
-const state = { currentTab: "dashboard", poll: null, lastProcessRunning: false, uploadingTemplate: false };
+const state = { currentTab: "dashboard", poll: null, lastProcessRunning: false, uploadingTemplate: false, testSteps: {} };
 
 const $ = (id) => document.getElementById(id);
 
@@ -210,6 +210,34 @@ function renderTemplates(templates) {
   }).join("");
 }
 
+function renderTestSteps(stepsByMode) {
+  state.testSteps = stepsByMode || {};
+  const list = $("stepTestList");
+  if (!list) return;
+  const mode = $("stepTestMode")?.value || "evening";
+  const steps = state.testSteps[mode] || [];
+  list.innerHTML = steps.map((item) => {
+    const clickLabel = item.action === "verify" ? "等待确认" : "识别并点击";
+    const clickClass = item.action === "verify" ? "secondary" : "primary";
+    const disabled = item.exists ? "" : "disabled";
+    return `
+      <article class="step-card" data-step-key="${item.key}">
+        <div class="step-index">${item.index}</div>
+        <div class="step-main">
+          <h3>${escapeHtml(item.label)}</h3>
+          <p>${escapeHtml(item.file)} · ${item.action === "verify" ? "只验证成功状态" : "点击步骤"} · ${item.exists ? "模板已配置" : "缺少模板"}</p>
+        </div>
+        <div class="step-actions">
+          <button class="ghost" data-step-action="capture" data-step-key="${item.key}">截图</button>
+          <button class="secondary" data-step-action="test" data-step-key="${item.key}" ${disabled}>只识别</button>
+          <button class="${clickClass}" data-step-action="click" data-step-key="${item.key}" ${disabled}>${clickLabel}</button>
+        </div>
+        <div class="step-result" id="stepResult-${item.key}">等待测试</div>
+      </article>
+    `;
+  }).join("") || `<section class="panel"><div class="screen-empty">暂无测试步骤</div></section>`;
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -256,6 +284,9 @@ async function refresh(options = {}) {
   if (options.forceTemplates || state.currentTab !== "templates") {
     renderTemplates(data.templates || []);
   }
+  if (options.forceSteps || state.currentTab !== "step-test") {
+    renderTestSteps(data.test_steps || {});
+  }
 }
 
 async function refreshProcess() {
@@ -277,6 +308,18 @@ async function runAction(dryRun = false) {
     keep_scrcpy: $("runKeepScrcpy").checked,
     dry_run: dryRun,
     mode: "auto",
+  };
+  const data = await api("/api/run", { method: "POST", body: JSON.stringify(payload) });
+  toast(data.message || "已启动");
+  refreshProcess();
+}
+
+async function runSelectedMode() {
+  const payload = {
+    workday_only: false,
+    keep_scrcpy: $("runKeepScrcpy")?.checked || false,
+    dry_run: false,
+    mode: $("stepTestMode").value || "evening",
   };
   const data = await api("/api/run", { method: "POST", body: JSON.stringify(payload) });
   toast(data.message || "已启动");
@@ -328,7 +371,8 @@ function switchTab(tab) {
   const titles = {
     dashboard: ["用量仪表盘", "查看打卡状态、计划任务和最近执行记录"],
     run: ["执行控制", "手动运行、检查工作日和查看实时输出"],
-    schedule: ["自动计划", "安装、更新或删除 Windows 计划任务"],
+    "step-test": ["测试步骤", "按正式流程逐步识别、截图和点击"],
+    schedule: ["自动计划", "安装、更新或删除自动计划"],
     templates: ["模板识别", "上传小图、测试识别，并等待目标出现后点击"],
     logs: ["操作日志", "查看脚本运行、跳过、失败和点击步骤"],
   };
@@ -336,6 +380,9 @@ function switchTab(tab) {
   setText("pageSubtitle", titles[tab][1]);
   if (tab === "templates") {
     refresh({ forceTemplates: true });
+  }
+  if (tab === "step-test") {
+    refresh({ forceSteps: true });
   }
 }
 
@@ -352,9 +399,28 @@ function templatePayload(key) {
   };
 }
 
+function stepPayload(key, action) {
+  return {
+    key,
+    action,
+    mode: $("stepTestMode").value || "evening",
+    threshold: Number($("stepTemplateThreshold").value || 0.86),
+    timeout: Number($("stepTemplateTimeout").value || 25),
+    fresh: $("stepFreshStart").checked,
+  };
+}
+
 function setTemplateResult(key, message) {
   const el = $(`templateResult-${key}`);
   if (el) el.textContent = message;
+}
+
+function setStepResult(key, message, status = "") {
+  const el = $(`stepResult-${key}`);
+  if (!el) return;
+  el.textContent = message;
+  el.classList.toggle("success", status === "success");
+  el.classList.toggle("failed", status === "failed");
 }
 
 async function uploadTemplate(key, file) {
@@ -388,12 +454,15 @@ async function testTemplate(key) {
   setTemplateResult(key, "正在识别...");
   const data = await api("/api/test-template", { method: "POST", body: JSON.stringify(templatePayload(key)) });
   if (!data.ok) {
-    setTemplateResult(key, data.message || "未识别到模板");
+    const best = typeof data.best_score === "number" ? `，最佳相似度 ${data.best_score.toFixed(3)}` : "";
+    const scale = typeof data.scale === "number" ? `，缩放 ${data.scale.toFixed(2)}` : "";
+    setTemplateResult(key, `${data.message || "未识别到模板"}${best}${scale}`);
     toast(data.message || "未识别到模板");
     return;
   }
   const relative = data.relative || [0, 0];
-  setTemplateResult(key, `识别成功：相似度 ${data.score.toFixed(3)}，中心相对坐标 ${relative[0].toFixed(4)},${relative[1].toFixed(4)}`);
+  const scale = typeof data.scale === "number" ? `，缩放 ${data.scale.toFixed(2)}` : "";
+  setTemplateResult(key, `识别成功：相似度 ${data.score.toFixed(3)}${scale}，中心相对坐标 ${relative[0].toFixed(4)},${relative[1].toFixed(4)}`);
   toast("识别成功");
 }
 
@@ -406,11 +475,13 @@ async function clickTemplate(key) {
     return;
   }
   if (data.screen) {
-    setTemplateResult(key, `已点击：相似度 ${data.score.toFixed(3)}，屏幕坐标 ${data.screen[0]},${data.screen[1]}`);
+    const scale = typeof data.scale === "number" ? `，缩放 ${data.scale.toFixed(2)}` : "";
+    setTemplateResult(key, `已点击：相似度 ${data.score.toFixed(3)}${scale}，屏幕坐标 ${data.screen[0]},${data.screen[1]}`);
     toast("已识别并点击");
   } else {
     const relative = data.relative || [0, 0];
-    setTemplateResult(key, `识别成功：相似度 ${data.score.toFixed(3)}，中心相对坐标 ${relative[0].toFixed(4)},${relative[1].toFixed(4)}`);
+    const scale = typeof data.scale === "number" ? `，缩放 ${data.scale.toFixed(2)}` : "";
+    setTemplateResult(key, `识别成功：相似度 ${data.score.toFixed(3)}${scale}，中心相对坐标 ${relative[0].toFixed(4)},${relative[1].toFixed(4)}`);
     toast("识别成功");
   }
 }
@@ -444,6 +515,113 @@ async function captureCurrentScreen() {
   }
 }
 
+async function captureStepScreen() {
+  setText("stepScreenStatus", "正在截图当前页面...");
+  const preview = $("stepScreenPreview");
+  if (preview) {
+    preview.innerHTML = `<div class="screen-empty">正在读取手机画面...</div>`;
+  }
+  try {
+    const data = await api("/api/capture-current-screen", { method: "POST", body: "{}" });
+    if (!data.ok) {
+      setText("stepScreenStatus", data.message || "截图失败");
+      toast(data.message || "截图失败");
+      return;
+    }
+    renderStepScreenshot(data);
+    toast("已截图当前页面");
+  } catch (error) {
+    const message = `截图失败：${error.message || error}`;
+    setText("stepScreenStatus", message);
+    if (preview) {
+      preview.innerHTML = `<div class="screen-empty">${escapeHtml(message)}</div>`;
+    }
+    toast(message);
+  }
+}
+
+function renderStepScreenshot(data) {
+  const preview = $("stepScreenPreview");
+  if (!preview || !data.url) return;
+  preview.innerHTML = `<img src="${data.url}" alt="测试步骤截图" />`;
+  const startedText = data.scrcpy_started ? "，已临时启动 scrcpy" : "";
+  setText("stepScreenStatus", `截图时间：${new Date().toLocaleString("zh-CN")}，尺寸：${data.width}×${data.height}${startedText}`);
+}
+
+async function runStepAction(key, action) {
+  setStepResult(key, action === "click" ? "等待模板出现..." : action === "test" ? "正在识别..." : "正在截图...");
+  try {
+    const data = await api("/api/test-step-action", { method: "POST", body: JSON.stringify(stepPayload(key, action)) });
+    if (!data.ok) {
+      const best = typeof data.best_score === "number" ? `，最佳相似度 ${data.best_score.toFixed(3)}` : "";
+      const scale = typeof data.scale === "number" ? `，缩放 ${data.scale.toFixed(2)}` : "";
+      setStepResult(key, `${data.message || "操作失败"}${best}${scale}`, "failed");
+      toast(data.message || "操作失败");
+      return;
+    }
+    if (action === "capture") {
+      renderStepScreenshot(data);
+      setStepResult(key, `${data.message}：${data.width}×${data.height}`, "success");
+      toast("已截图");
+      return;
+    }
+    const relative = data.relative || [0, 0];
+    const score = typeof data.score === "number" ? data.score.toFixed(3) : "--";
+    const scale = typeof data.scale === "number" ? `，缩放 ${data.scale.toFixed(2)}` : "";
+    if (data.screen) {
+      setStepResult(key, `已点击：相似度 ${score}${scale}，相对坐标 ${relative[0].toFixed(4)},${relative[1].toFixed(4)}，屏幕坐标 ${data.screen[0]},${data.screen[1]}`, "success");
+      toast("已识别并点击");
+      return;
+    }
+    setStepResult(key, `${data.message}：相似度 ${score}${scale}，相对坐标 ${relative[0].toFixed(4)},${relative[1].toFixed(4)}`, "success");
+    toast(data.message || "步骤成功");
+  } catch (error) {
+    const message = error.message || String(error);
+    setStepResult(key, message, "failed");
+    toast(message);
+  }
+}
+
+async function openDingTalkForStepTest() {
+  setText("stepTestStatus", "正在打开钉钉...");
+  try {
+    const data = await api("/api/test-step-action", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "open-dingtalk",
+        mode: $("stepTestMode").value || "evening",
+        fresh: $("stepFreshStart").checked,
+      }),
+    });
+    setText("stepTestStatus", data.message || "已打开钉钉");
+    toast(data.message || "已打开钉钉");
+  } catch (error) {
+    const message = error.message || String(error);
+    setText("stepTestStatus", message);
+    toast(message);
+  }
+}
+
+async function checkUnlockForStepTest() {
+  setText("stepTestStatus", "正在检查屏幕锁定状态...");
+  try {
+    const data = await api("/api/test-step-action", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "check-unlock",
+        mode: $("stepTestMode").value || "evening",
+      }),
+    });
+    const manual = data.manual_required ? "，仍需手动解锁" : "";
+    setText("stepTestStatus", `${data.message || "检查完成"}${manual}`);
+    toast(data.manual_required ? "仍需手动解锁" : "屏幕状态正常");
+  } catch (error) {
+    const message = error.message || String(error);
+    setText("stepTestStatus", message);
+    toast(message);
+  }
+}
+
 function bind() {
   document.querySelectorAll(".nav-item[data-tab]").forEach((el) => el.addEventListener("click", () => switchTab(el.dataset.tab)));
   document.querySelectorAll("[data-open]").forEach((el) => el.addEventListener("click", () => openFolder(el.dataset.open)));
@@ -466,6 +644,11 @@ function bind() {
   $("runFromSchedule").addEventListener("click", () => runAction(false));
   $("deleteTask").addEventListener("click", deleteTask);
   $("captureScreen").addEventListener("click", captureCurrentScreen);
+  $("stepCheckUnlock").addEventListener("click", checkUnlockForStepTest);
+  $("stepOpenDingTalk").addEventListener("click", openDingTalkForStepTest);
+  $("stepCaptureScreen").addEventListener("click", captureStepScreen);
+  $("stepRunFull").addEventListener("click", runSelectedMode);
+  $("stepTestMode").addEventListener("change", () => renderTestSteps(state.testSteps));
 
   document.addEventListener("change", (event) => {
     const key = event.target?.dataset?.uploadTemplate;
@@ -477,8 +660,11 @@ function bind() {
   document.addEventListener("click", (event) => {
     const testKey = event.target?.dataset?.testTemplate;
     const clickKey = event.target?.dataset?.clickTemplate;
+    const stepKey = event.target?.dataset?.stepKey;
+    const stepAction = event.target?.dataset?.stepAction;
     if (testKey) testTemplate(testKey);
     if (clickKey) clickTemplate(clickKey);
+    if (stepKey && stepAction) runStepAction(stepKey, stepAction);
   });
 }
 
