@@ -352,6 +352,12 @@ async function setTaskPaused(paused) {
   refresh();
 }
 
+async function testSchedule(mode) {
+  const data = await api("/api/test-schedule", { method: "POST", body: JSON.stringify({ mode }) });
+  toast(data.message || (data.ok ? "已请求触发计划" : "触发失败"));
+  refresh();
+}
+
 async function stopRun() {
   const data = await api("/api/stop-run", { method: "POST", body: "{}" });
   toast(data.message || (data.ok ? "已请求停止" : "停止失败"));
@@ -642,6 +648,8 @@ function bind() {
   $("pauseTask").addEventListener("click", () => setTaskPaused(true));
   $("resumeTask").addEventListener("click", () => setTaskPaused(false));
   $("runFromSchedule").addEventListener("click", () => runAction(false));
+  $("testMorningSchedule").addEventListener("click", () => testSchedule("morning"));
+  $("testEveningSchedule").addEventListener("click", () => testSchedule("evening"));
   $("deleteTask").addEventListener("click", deleteTask);
   $("captureScreen").addEventListener("click", captureCurrentScreen);
   $("stepCheckUnlock").addEventListener("click", checkUnlockForStepTest);

@@ -290,6 +290,7 @@ def run_offwork_sequence(
         time.sleep(delay)
         return True
 
+    sequence_succeeded = False
     try:
         append_action(sequence_name, "开始", "点击序列已开始", {"mode": mode})
         for index, step in enumerate(steps, start=1):
@@ -310,12 +311,14 @@ def run_offwork_sequence(
             )
             if index < len(steps):
                 time.sleep(delay)
+        sequence_succeeded = True
     finally:
         if started_scrcpy and not keep_scrcpy:
             close_window(hwnd)
             emit("已关闭本次脚本启动的 scrcpy 窗口")
         restore_sleep()
         emit("已恢复系统睡眠策略")
+        finish_device()
 
-    finish_device()
-    mark_completed(sequence["completed"])
+    if sequence_succeeded:
+        mark_completed(sequence["completed"])

@@ -48,7 +48,7 @@ macOS：
 
 ```bash
 cd /Users/to/Documents/logyxiao/ok-dd
-./启动钉钉打卡面板.command
+./start-panel.command
 ```
 
 也可以直接运行：
@@ -56,6 +56,8 @@ cd /Users/to/Documents/logyxiao/ok-dd
 ```bash
 .venv/bin/python scripts/dingtalk_gui.py
 ```
+
+如果终端或启动器对中文文件名编码异常，使用 `start-panel.command` 或 `start-panel.sh`，不要使用中文 `.command` 文件名。
 
 Windows：
 

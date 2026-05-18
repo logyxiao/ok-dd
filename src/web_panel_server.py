@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -80,8 +81,12 @@ DEFAULT_PORT = 8765
 IS_MACOS = sys.platform == "darwin"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 LAUNCHD_LABELS = {
-    "morning": "com.ok-dingtalk.morning",
-    "evening": "com.ok-dingtalk.evening",
+    "morning": "com.okdingtalk3.morning",
+    "evening": "com.okdingtalk3.evening",
+}
+LEGACY_LAUNCHD_LABELS = {
+    "morning": ["com.ok-dingtalk.morning", "com.ok-dingtalk.schedule.morning", "com.okdingtalk2.morning"],
+    "evening": ["com.ok-dingtalk.evening", "com.ok-dingtalk.evening2", "com.ok-dingtalk.schedule.evening", "com.okdingtalk2.evening", "com.okdingtalk2.inline", "com.okdingtalk2.scriptfile"],
 }
 
 
@@ -124,6 +129,15 @@ def automation_env() -> dict[str, str]:
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     return env
+
+
+def launchd_env() -> dict[str, str]:
+    return {
+        "HOME": str(Path.home()),
+        "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
 
 
 def powershell(command: str, timeout: int = 15) -> subprocess.CompletedProcess:
@@ -260,6 +274,7 @@ def get_macos_task_info() -> dict:
         path = plist_path(key)
         plist = read_launchd_plist(key)
         installed = path.exists()
+        launchd_status = get_macos_launchd_status(key) if installed else {}
         start_calendar = plist.get("StartCalendarInterval") if plist else {}
         target_time = schedule.get(f"{key}_time") or (
             f"{int(start_calendar.get('Hour', 0)):02d}:{int(start_calendar.get('Minute', 0)):02d}"
@@ -274,11 +289,12 @@ def get_macos_task_info() -> dict:
             "state": "Ready" if installed else "Missing",
             "next_run": next_target_run(target_time) if target_time else "",
             "last_run": "",
-            "last_result": "",
+            "last_result": launchd_status.get("summary", ""),
             "trigger_time": target_time,
             "target_time": target_time,
             "random_delay": "",
             "random_delay_minutes": schedule.get("random_window_minutes", 0) * 2 if schedule else 0,
+            "launchd": launchd_status,
         }
     installed_tasks = [task for task in tasks.values() if task.get("installed")]
     next_runs = [task.get("next_run", "") for task in installed_tasks if task.get("next_run")]
@@ -303,29 +319,52 @@ def write_macos_plist(
     import plistlib
 
     parsed = parse_hhmm(target_time)
-    command = automation_command(
-        workday_only=workday_only,
-        random_delay_minutes=random_delay_minutes,
-        mode=key,
+    python = "/opt/homebrew/bin/python3.12" if Path("/opt/homebrew/bin/python3.12").exists() else str(Path(sys.executable).resolve())
+    shell_command = (
+        f"cd {shlex.quote(str(ROOT))}; "
+        "export PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; "
+        f"{shlex.quote(python)} scripts/schedule_runner.py --mode {shlex.quote(key)}"
     )
+    command = ["/bin/sh", "-c", shell_command]
     label = LAUNCHD_LABELS[key]
     path = plist_path(key)
     log_path = LOG_DIR / f"{key}_launchd.log"
     error_log_path = LOG_DIR / f"{key}_launchd_error.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path.touch(exist_ok=True)
+    error_log_path.touch(exist_ok=True)
     LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "Label": label,
         "ProgramArguments": command,
-        "WorkingDirectory": str(ROOT),
-        "EnvironmentVariables": automation_env(),
-        "StartCalendarInterval": {"Hour": parsed.hour, "Minute": parsed.minute},
+        "StartInterval": 60,
         "StandardOutPath": str(log_path),
         "StandardErrorPath": str(error_log_path),
     }
     with path.open("wb") as file:
         plistlib.dump(payload, file)
     return path
+
+
+def get_macos_launchd_status(key: str) -> dict:
+    result = launchctl(["print", f"gui/{os.getuid()}/{LAUNCHD_LABELS[key]}"], timeout=15)
+    text = f"{result.stdout}\n{result.stderr}"
+    runs_match = re.search(r"\bruns = (\d+)", text)
+    exit_match = re.search(r"\blast exit code = ([^\n]+)", text)
+    state_match = re.search(r"\bstate = ([^\n]+)", text)
+    runs = int(runs_match.group(1)) if runs_match else 0
+    last_exit = exit_match.group(1).strip() if exit_match else ""
+    state = state_match.group(1).strip() if state_match else ""
+    summary = f"launchd runs={runs}"
+    if last_exit:
+        summary += f", last_exit={last_exit}"
+    return {
+        "loaded": result.returncode == 0,
+        "runs": runs,
+        "state": state,
+        "last_exit": last_exit,
+        "summary": summary,
+    }
 
 
 def load_macos_plist(path: Path) -> subprocess.CompletedProcess:
@@ -617,6 +656,9 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/resume-task":
             self.set_task_enabled(True)
             return
+        if parsed.path == "/api/test-schedule":
+            self.test_schedule(payload)
+            return
         if parsed.path == "/api/stop-run":
             ok, message = PROCESS_STATE.stop()
             self.send_json({"ok": ok, "message": message, "process": PROCESS_STATE.snapshot()})
@@ -745,12 +787,14 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             outputs = []
             ok = True
             for key, meta in TASKS.items():
-                path = plist_path(key)
-                result = unload_macos_plist(path) if path.exists() else subprocess.CompletedProcess([], 0, "", "")
-                if path.exists():
-                    path.unlink()
-                outputs.append({"task": meta["name"], "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
-                ok = ok and result.returncode == 0
+                labels = [LAUNCHD_LABELS[key], *LEGACY_LAUNCHD_LABELS.get(key, [])]
+                for label in labels:
+                    path = LAUNCH_AGENTS_DIR / f"{label}.plist"
+                    result = unload_macos_plist(path) if path.exists() else subprocess.CompletedProcess([], 0, "", "")
+                    if path.exists():
+                        path.unlink()
+                    outputs.append({"task": label, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+                    ok = ok and result.returncode == 0
             if ok and SCHEDULE_FILE.exists():
                 SCHEDULE_FILE.unlink()
             self.send_json({"ok": ok, "outputs": outputs, "task": get_task_info()})
@@ -808,6 +852,15 @@ class WebPanelHandler(BaseHTTPRequestHandler):
                 "task": get_task_info(),
             }
         )
+
+    def test_schedule(self, payload: dict) -> None:
+        mode = str(payload.get("mode") or "evening")
+        if mode not in TASKS:
+            self.send_json({"ok": False, "message": "未知计划模式"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        command = automation_command(workday_only=True, dry_run=True, mode=mode)
+        ok, message = PROCESS_STATE.start(command)
+        self.send_json({"ok": ok, "message": message, "process": PROCESS_STATE.snapshot()})
 
     def open_target(self, target: str) -> None:
         if target == "logs":

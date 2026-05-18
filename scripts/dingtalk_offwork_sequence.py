@@ -69,6 +69,18 @@ def main() -> int:
     if mode == "auto":
         mode = "morning" if datetime.now().hour < 12 else "evening"
     action_name = "上班打卡序列" if mode == "morning" else "下班打卡序列"
+    append_action(
+        action_name,
+        "启动",
+        "脚本已启动",
+        {
+            "mode": mode,
+            "workday_only": args.workday_only,
+            "dry_run": args.dry_run,
+            "random_delay_minutes": args.random_delay_minutes,
+            "argv": sys.argv[1:],
+        },
+    )
 
     if args.workday_only:
         description = describe_china_workday(run_date)
