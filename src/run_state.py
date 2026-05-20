@@ -43,7 +43,7 @@ def save_state(state: dict[str, Any]) -> None:
         json.dump(state, file, ensure_ascii=False, indent=2)
 
 
-def mark_completed(message: str = "已完成") -> None:
+def mark_completed(message: str = "已完成", event: str = "下班打卡序列") -> None:
     completed_at = now_text()
     state = load_state()
     state["last_completed_at"] = completed_at
@@ -51,7 +51,7 @@ def mark_completed(message: str = "已完成") -> None:
     state["last_status"] = "成功"
     state["last_message"] = message
     save_state(state)
-    append_action("下班打卡序列", "成功", message)
+    append_action(event, "成功", message)
 
 
 def mark_failed(message: str, event: str = "下班打卡序列") -> None:

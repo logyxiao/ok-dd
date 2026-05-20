@@ -11,3 +11,4 @@ release/
 *.spec
 .bytro
 python
+.alma-snapshots

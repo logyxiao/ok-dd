@@ -23,7 +23,22 @@
 - scrcpy 可在命令行执行：`scrcpy`
 - Android 手机已开启 USB 调试，并允许当前电脑调试
 
-macOS 推荐使用 Homebrew：
+macOS 推荐使用 Homebrew。第一次放到一台新的 Mac 上时，优先运行项目内置初始化脚本：
+
+```bash
+./scripts/bootstrap_macos.sh
+```
+
+它会检查并安装/配置：
+
+- `python@3.12`
+- `android-platform-tools`
+- `scrcpy`
+- 项目虚拟环境 `.venv`
+- Python 依赖
+- 启动脚本执行权限
+
+也可以手动安装：
 
 ```bash
 brew install python@3.12 android-platform-tools scrcpy
@@ -47,9 +62,10 @@ python -m pip install -r requirements.txt
 macOS：
 
 ```bash
-cd /Users/to/Documents/logyxiao/ok-dd
 ./start-panel.command
 ```
+
+`start-panel.command` 会自动使用项目内 `.venv`。如果 `.venv` 不存在或依赖缺失，会尝试调用 `scripts/bootstrap_macos.sh` 修复。
 
 也可以直接运行：
 
@@ -76,6 +92,79 @@ python scripts\dingtalk_gui.py
 ```text
 http://127.0.0.1:8765/
 ```
+
+## 发给别人 Mac 使用
+
+### 从 Git 克隆后启动
+
+如果对方的 Mac 已经配置过 GitHub SSH key，可以用 SSH 克隆：
+
+```bash
+git clone git@github.com:logyxiao/ok-dd.git
+cd ok-dd
+./scripts/bootstrap_macos.sh
+./start-panel.command
+```
+
+如果没有配置 SSH key，使用 HTTPS 克隆：
+
+```bash
+git clone https://github.com/logyxiao/ok-dd.git
+cd ok-dd
+./scripts/bootstrap_macos.sh
+./start-panel.command
+```
+
+第一次运行时，`bootstrap_macos.sh` 会检查 Homebrew、Python 3.12、ADB、scrcpy，并创建 `.venv` 安装依赖。初始化完成后，连接 Android 手机，开启 USB 调试，并在手机弹窗中允许当前电脑调试。
+
+如果 macOS 提示脚本没有执行权限，运行：
+
+```bash
+chmod +x scripts/bootstrap_macos.sh scripts/doctor_macos.py start-panel.command start-panel.sh
+```
+
+如果启动失败，先运行诊断：
+
+```bash
+./scripts/doctor_macos.py
+```
+
+诊断里最常见的问题是 `adb devices` 没有设备或显示 `unauthorized`。这通常需要重新插拔手机、打开 USB 调试，或在手机上重新允许当前电脑。
+
+建议交付前确认项目目录里包含这些内容：
+
+```text
+assets/templates/
+data/china_workdays_2026.json
+scripts/bootstrap_macos.sh
+scripts/doctor_macos.py
+start-panel.command
+requirements.txt
+web/
+src/
+```
+
+对方拿到项目后：
+
+1. 解压或克隆项目到任意目录。
+2. 双击 `start-panel.command`，或在终端运行 `./start-panel.command`。
+3. 如果是第一次运行，脚本会初始化 `.venv` 并安装依赖。
+4. 连接 Android 手机，开启 USB 调试，并在手机弹窗中允许当前电脑。
+5. 打开 `http://127.0.0.1:8765/`。
+
+如果启动失败，运行诊断：
+
+```bash
+./scripts/doctor_macos.py
+```
+
+常见迁移问题：
+
+- 没有 Homebrew：先安装 <https://brew.sh/>。
+- `adb devices` 无设备：检查 USB 线、USB 调试和手机授权弹窗。
+- 显示 `unauthorized`：在手机上重新允许当前电脑调试。
+- 模板相似度低：在新手机/新分辨率下重新截图并裁剪模板。
+- 自动计划不触发：在 Web 面板“自动计划”页重新保存一次计划，让 launchd 生成当前 Mac 的 plist。
 
 ## 推荐测试顺序
 

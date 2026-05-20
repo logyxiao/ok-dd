@@ -147,7 +147,11 @@ def run_offwork_sequence(
         wake_display()
         emit(f"scrcpy 已恢复：句柄={hwnd}")
 
-    def wait_best_template(candidates: list[tuple[str, ClickStep, Path]], timeout_seconds: float):
+    def wait_best_template(
+        candidates: list[tuple[str, ClickStep, Path]],
+        timeout_seconds: float,
+        threshold: float = template_threshold,
+    ):
         loaded = [(candidate_mode, candidate_step, candidate_path, load_template(candidate_path)) for candidate_mode, candidate_step, candidate_path in candidates]
         deadline = time.monotonic() + timeout_seconds
         best_seen = None
@@ -174,7 +178,7 @@ def run_offwork_sequence(
                     matches.append((match.score, candidate_mode, candidate_step, candidate_path, match))
                     if not best_seen or match.score > best_seen[0]:
                         best_seen = (match.score, candidate_mode, candidate_step, candidate_path, match)
-            ready = [item for item in matches if item[0] >= template_threshold]
+            ready = [item for item in matches if item[0] >= threshold]
             if ready:
                 _score, candidate_mode, candidate_step, candidate_path, match = max(ready, key=lambda item: item[0])
                 return candidate_mode, candidate_step, candidate_path, match, best_seen
@@ -196,8 +200,13 @@ def run_offwork_sequence(
         if step.action == "verify":
             if not use_templates or not candidates:
                 raise FileNotFoundError(f"{step.name}需要配置成功文字模板：{template_path}")
-            emit(f"{index}. 等待确认：{step.name}（同步识别上班/下班成功模板）")
-            matched_mode, matched_step, matched_path, match, _best_seen = wait_best_template(candidates, timeout_seconds)
+            verify_threshold = min(template_threshold, 0.80)
+            emit(f"{index}. 等待确认：{step.name}（同步识别上班/下班成功模板，阈值={verify_threshold:.2f}）")
+            matched_mode, matched_step, matched_path, match, _best_seen = wait_best_template(
+                candidates,
+                timeout_seconds,
+                threshold=verify_threshold,
+            )
             relative_x, relative_y = match.center_relative
             message = (
                 f"{index}. {matched_step.name}：已识别成功文字，模式={matched_mode}，相似度={match.score:.3f} "
@@ -321,4 +330,4 @@ def run_offwork_sequence(
         finish_device()
 
     if sequence_succeeded:
-        mark_completed(sequence["completed"])
+        mark_completed(sequence["completed"], event=sequence_name)

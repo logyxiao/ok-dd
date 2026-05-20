@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import socket
 import subprocess
 import sys
@@ -80,6 +79,7 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 DEFAULT_PORT = 8765
 IS_MACOS = sys.platform == "darwin"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LAUNCHD_LOG_DIR = Path.home() / "Library" / "Logs" / "ok-dd"
 LAUNCHD_LABELS = {
     "morning": "com.okdingtalk3.morning",
     "evening": "com.okdingtalk3.evening",
@@ -319,25 +319,29 @@ def write_macos_plist(
     import plistlib
 
     parsed = parse_hhmm(target_time)
-    python = "/opt/homebrew/bin/python3.12" if Path("/opt/homebrew/bin/python3.12").exists() else str(Path(sys.executable).resolve())
-    shell_command = (
-        f"cd {shlex.quote(str(ROOT))}; "
-        "export PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; "
-        f"{shlex.quote(python)} scripts/schedule_runner.py --mode {shlex.quote(key)}"
-    )
-    command = ["/bin/sh", "-c", shell_command]
+    venv_python = ROOT / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        python = str(venv_python)
+    else:
+        python = "/opt/homebrew/bin/python3.12" if Path("/opt/homebrew/bin/python3.12").exists() else str(Path(sys.executable).resolve())
+    command = [python, str(ROOT / "scripts" / "schedule_runner.py"), "--mode", key]
     label = LAUNCHD_LABELS[key]
     path = plist_path(key)
-    log_path = LOG_DIR / f"{key}_launchd.log"
-    error_log_path = LOG_DIR / f"{key}_launchd_error.log"
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LAUNCHD_LOG_DIR / f"{key}_launchd.log"
+    error_log_path = LAUNCHD_LOG_DIR / f"{key}_launchd_error.log"
+    LAUNCHD_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path.touch(exist_ok=True)
     error_log_path.touch(exist_ok=True)
     LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "Label": label,
         "ProgramArguments": command,
-        "StartInterval": 60,
+        "WorkingDirectory": str(ROOT),
+        "EnvironmentVariables": launchd_env(),
+        "StartCalendarInterval": {
+            "Hour": parsed.hour,
+            "Minute": parsed.minute,
+        },
         "StandardOutPath": str(log_path),
         "StandardErrorPath": str(error_log_path),
     }
