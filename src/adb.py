@@ -5,27 +5,51 @@ import time
 from dataclasses import dataclass
 
 
-def run_adb(args: list[str], timeout: float = 30) -> subprocess.CompletedProcess:
-    command = ["adb", *args]
-    result = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
+def _should_retry_adb(output: str) -> bool:
+    lowered = output.lower()
+    retry_markers = (
+        "no devices/emulators found",
+        "device offline",
+        "device unauthorized",
+        "more than one device/emulator",
     )
-    if result.returncode != 0:
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-        details = [f"ADB 命令执行失败：{subprocess.list2cmdline(command)}", f"退出码：{result.returncode}"]
-        if stdout:
-            details.append(f"标准输出：{stdout}")
-        if stderr:
-            details.append(f"错误输出：{stderr}")
-        details.append("请确认手机已连接、已开启 USB 调试，并在手机上允许当前电脑调试。")
-        raise RuntimeError("\n".join(details))
-    return result
+    return any(marker in lowered for marker in retry_markers)
+
+
+def run_adb(args: list[str], timeout: float = 30, retries: int = 2, retry_delay: float = 1.5) -> subprocess.CompletedProcess:
+    command = ["adb", *args]
+    last_result: subprocess.CompletedProcess | None = None
+    for attempt in range(retries + 1):
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        last_result = result
+        if result.returncode == 0:
+            return result
+
+        combined = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        if attempt < retries and _should_retry_adb(combined):
+            time.sleep(retry_delay)
+            continue
+        break
+
+    assert last_result is not None
+    stdout = last_result.stdout.strip()
+    stderr = last_result.stderr.strip()
+    details = [f"ADB 命令执行失败：{subprocess.list2cmdline(command)}", f"退出码：{last_result.returncode}"]
+    if stdout:
+        details.append(f"标准输出：{stdout}")
+    if stderr:
+        details.append(f"错误输出：{stderr}")
+    if retries > 0:
+        details.append(f"已自动重试 {retries} 次。")
+    details.append("请确认手机已连接、已开启 USB 调试，并在手机上允许当前电脑调试。")
+    raise RuntimeError("\n".join(details))
 
 
 def force_stop_package(package_name: str) -> None:

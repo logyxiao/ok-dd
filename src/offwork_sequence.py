@@ -22,14 +22,22 @@ class ClickStep:
     x: float
     y: float
     template: str = ""
+    alternate_templates: tuple[str, ...] = ()
     action: str = "click"
 
 
 DEFAULT_STEPS = [
-    ClickStep("打开打卡入口", 0.650, 0.150, "work_notice.png"),
-    ClickStep("点击打卡下班", 0.500, 0.600, "offwork_button.png"),
-    ClickStep("点击外勤打卡下班", 0.500, 0.600, "field_offwork_button.png"),
-    ClickStep("确认下班打卡成功", 0.500, 0.940, "offwork_success_text.png", "verify"),
+    ClickStep("打开打卡入口", 0.650, 0.150, template="work_notice.png"),
+    ClickStep("点击打卡下班", 0.500, 0.600, template="offwork_button.png"),
+    ClickStep("点击外勤打卡下班", 0.500, 0.600, template="field_offwork_button.png"),
+    ClickStep(
+        "确认下班打卡成功",
+        0.500,
+        0.940,
+        template="offwork_success_text.png",
+        alternate_templates=("offwork_success_text_v2.png",),
+        action="verify",
+    ),
 ]
 
 CLOCK_STEPS = {
@@ -37,10 +45,16 @@ CLOCK_STEPS = {
         "name": "上班打卡序列",
         "completed": "上班打卡序列已完成",
         "steps": [
-            ClickStep("打开上班打卡入口", 0.650, 0.150, "morning_work_notice.png"),
-            ClickStep("点击打卡上班", 0.500, 0.600, "morning_clock_button.png"),
-            ClickStep("点击外勤打卡上班", 0.500, 0.600, "morning_field_clock_button.png"),
-            ClickStep("确认上班打卡成功", 0.500, 0.940, "morning_success_text.png", "verify"),
+            ClickStep("打开上班打卡入口", 0.650, 0.150, template="morning_work_notice.png"),
+            ClickStep(
+                "点击打卡上班",
+                0.500,
+                0.600,
+                template="morning_clock_button.png",
+                alternate_templates=("morning_immediate_clock_button.png",),
+            ),
+            ClickStep("点击外勤打卡上班", 0.500, 0.600, template="morning_field_clock_button.png"),
+            ClickStep("确认上班打卡成功", 0.500, 0.940, template="morning_success_text.png", action="verify"),
         ],
     },
     "evening": {
@@ -74,6 +88,16 @@ def run_offwork_sequence(
         if progress:
             progress(message)
 
+    def ensure_device_ready(context: str, reopen_app: bool = False) -> None:
+        emit(f"{context}：检查设备状态")
+        state = wake_and_unlock_if_possible()
+        emit(f"{context}：手机屏幕状态：{state.description}")
+        if state.locked:
+            raise RuntimeError(f"{context}后手机仍处于锁屏状态，请先手动解锁后再执行")
+        if reopen_app and open_dingtalk:
+            emit(f"{context}：重新打开钉钉")
+            launch_package(package, wait_seconds=launch_wait, fresh=fresh)
+
     def finish_device() -> None:
         try:
             emit("关闭钉钉")
@@ -100,10 +124,7 @@ def run_offwork_sequence(
     keep_system_awake()
     wake_display()
     emit("已请求系统保持唤醒")
-    device_state = wake_and_unlock_if_possible()
-    emit(f"手机屏幕状态：{device_state.description}")
-    if device_state.locked:
-        raise RuntimeError("手机仍处于锁屏状态，请先手动解锁后再执行")
+    ensure_device_ready("启动前")
 
     if open_dingtalk:
         emit("打开钉钉")
@@ -121,11 +142,13 @@ def run_offwork_sequence(
             if step_index >= len(candidate_steps):
                 continue
             candidate_step = candidate_steps[step_index]
-            if candidate_step.action != step.action or not candidate_step.template:
+            if candidate_step.action != step.action:
                 continue
-            candidate_path = template_dir / candidate_step.template
-            if candidate_path.exists():
-                candidates.append((candidate_mode, candidate_step, candidate_path))
+            template_names = tuple(name for name in (candidate_step.template, *candidate_step.alternate_templates) if name)
+            for template_name in template_names:
+                candidate_path = template_dir / template_name
+                if candidate_path.exists():
+                    candidates.append((candidate_mode, candidate_step, candidate_path))
         return candidates
 
     def save_diagnostic_frame(frame, reason: str) -> Path | None:
@@ -142,6 +165,7 @@ def run_offwork_sequence(
         append_action(sequence_name, "重试", f"scrcpy 画面异常，重启：{reason}")
         close_window(hwnd)
         time.sleep(1.5)
+        ensure_device_ready("scrcpy 重启前", reopen_app=True)
         hwnd, restarted = ensure_any_scrcpy_window(title, timeout=timeout)
         started_scrcpy = started_scrcpy or restarted
         wake_display()

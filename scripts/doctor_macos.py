@@ -14,12 +14,14 @@ TEMPLATE_DIR = ROOT / "assets" / "templates"
 REQUIRED_TEMPLATES = [
     "morning_work_notice.png",
     "morning_clock_button.png",
+    "morning_immediate_clock_button.png",
     "morning_field_clock_button.png",
     "morning_success_text.png",
     "work_notice.png",
     "offwork_button.png",
     "field_offwork_button.png",
     "offwork_success_text.png",
+    "offwork_success_text_v2.png",
 ]
 
 
