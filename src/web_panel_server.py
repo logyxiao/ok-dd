@@ -84,6 +84,7 @@ LAUNCHD_LABELS = {
     "morning": "com.okdingtalk3.morning",
     "evening": "com.okdingtalk3.evening",
 }
+LAUNCHD_RETRY_INTERVAL_SECONDS = 300
 LEGACY_LAUNCHD_LABELS = {
     "morning": ["com.ok-dingtalk.morning", "com.ok-dingtalk.schedule.morning", "com.okdingtalk2.morning"],
     "evening": ["com.ok-dingtalk.evening", "com.ok-dingtalk.evening2", "com.ok-dingtalk.schedule.evening", "com.okdingtalk2.evening", "com.okdingtalk2.inline", "com.okdingtalk2.scriptfile"],
@@ -318,7 +319,7 @@ def write_macos_plist(
 ) -> Path:
     import plistlib
 
-    parsed = parse_hhmm(target_time)
+    parse_hhmm(target_time)
     venv_python = ROOT / ".venv" / "bin" / "python"
     if venv_python.exists():
         python = str(venv_python)
@@ -338,10 +339,7 @@ def write_macos_plist(
         "ProgramArguments": command,
         "WorkingDirectory": str(ROOT),
         "EnvironmentVariables": launchd_env(),
-        "StartCalendarInterval": {
-            "Hour": parsed.hour,
-            "Minute": parsed.minute,
-        },
+        "StartInterval": LAUNCHD_RETRY_INTERVAL_SECONDS,
         "StandardOutPath": str(log_path),
         "StandardErrorPath": str(error_log_path),
     }
@@ -378,6 +376,17 @@ def load_macos_plist(path: Path) -> subprocess.CompletedProcess:
 
 def unload_macos_plist(path: Path) -> subprocess.CompletedProcess:
     return launchctl(["bootout", f"gui/{os.getuid()}", str(path)], timeout=15)
+
+
+def remove_legacy_macos_plists(key: str) -> list[dict]:
+    outputs = []
+    for label in LEGACY_LAUNCHD_LABELS.get(key, []):
+        path = LAUNCH_AGENTS_DIR / f"{label}.plist"
+        result = unload_macos_plist(path) if path.exists() else subprocess.CompletedProcess([], 0, "", "")
+        if path.exists():
+            path.unlink()
+        outputs.append({"task": label, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})
+    return outputs
 
 
 def parse_hhmm(value: str) -> datetime:
@@ -767,6 +776,7 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         for key, target_time in {"morning": morning_time, "evening": evening_time}.items():
             task_name = TASKS[key]["name"]
             try:
+                outputs.extend(remove_legacy_macos_plists(key))
                 path = write_macos_plist(key, target_time, workday_only, random_delay_minutes)
                 result = load_macos_plist(path)
                 outputs.append({"task": task_name, "ok": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr})

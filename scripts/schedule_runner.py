@@ -14,7 +14,8 @@ from src.workday import describe_china_workday, is_china_workday
 
 SCHEDULE_FILE = LOG_DIR / "schedule_config.json"
 RUNNER_STATE_FILE = LOG_DIR / "schedule_runner_state.json"
-RUN_GRACE_MINUTES = 15
+MORNING_RETRY_UNTIL = "09:30"
+EVENING_RETRY_UNTIL = "21:00"
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,13 +43,21 @@ def parse_target_datetime(now: datetime, target: str) -> datetime:
     return now.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
 
 
-def is_due(now: datetime, target: str, grace_minutes: int = RUN_GRACE_MINUTES) -> tuple[bool, str, int]:
+def is_due(now: datetime, target: str, mode: str) -> tuple[bool, str, int]:
     target_at = parse_target_datetime(now, target)
     late_seconds = int((now - target_at).total_seconds())
     if late_seconds < 0:
         return False, "未到计划时间", late_seconds
-    if late_seconds > grace_minutes * 60:
-        return False, f"已超过 {grace_minutes} 分钟容忍窗口", late_seconds
+
+    if mode == "morning":
+        retry_until = parse_target_datetime(now, MORNING_RETRY_UNTIL)
+        if now > retry_until:
+            return False, f"已超过早上 {MORNING_RETRY_UNTIL} 重试截止时间", late_seconds
+    elif mode == "evening":
+        retry_until = parse_target_datetime(now, EVENING_RETRY_UNTIL)
+        if now > retry_until:
+            return False, f"已超过晚上 {EVENING_RETRY_UNTIL} 重试截止时间", late_seconds
+
     return True, "计划到点", late_seconds
 
 
@@ -62,7 +71,7 @@ def main() -> int:
 
     now = datetime.now()
     try:
-        due, reason, late_seconds = is_due(now, target)
+        due, reason, late_seconds = is_due(now, target, args.mode)
     except ValueError:
         append_action("自动计划", "跳过", "目标时间格式无效", {"mode": args.mode, "target": target})
         return 0
@@ -77,13 +86,15 @@ def main() -> int:
                 "target": target,
                 "now": now.strftime("%H:%M:%S"),
                 "late_seconds": late_seconds,
-                "grace_minutes": RUN_GRACE_MINUTES,
+                "morning_retry_until": MORNING_RETRY_UNTIL if args.mode == "morning" else "",
+                "evening_retry_until": EVENING_RETRY_UNTIL if args.mode == "evening" else "",
             },
         )
         return 0
 
     run_date = now.date()
-    if not is_china_workday(run_date):
+    workday_only = bool(schedule.get("workday_only", True))
+    if workday_only and not is_china_workday(run_date):
         description = describe_china_workday(run_date)
         append_action(
             "自动计划",
@@ -93,7 +104,7 @@ def main() -> int:
                 "mode": args.mode,
                 "target": target,
                 "date": run_date.isoformat(),
-                "workday_only": True,
+                "workday_only": workday_only,
             },
         )
         return 0
@@ -109,19 +120,14 @@ def main() -> int:
         )
         return 0
 
-    state[run_key] = now.strftime("%Y-%m-%d %H:%M:%S")
-    save_json(RUNNER_STATE_FILE, state)
-
-    random_delay_minutes = int(schedule.get("random_window_minutes") or 0) * 2
     command = [
         sys.executable,
         str(ROOT / "scripts" / "dingtalk_offwork_sequence.py"),
         "--mode",
         args.mode,
     ]
-    command.append("--workday-only")
-    if random_delay_minutes > 0:
-        command.extend(["--random-delay-minutes", str(random_delay_minutes)])
+    if workday_only:
+        command.append("--workday-only")
 
     append_action(
         "自动计划",
@@ -131,11 +137,30 @@ def main() -> int:
             "mode": args.mode,
             "target": target,
             "late_seconds": late_seconds,
-            "grace_minutes": RUN_GRACE_MINUTES,
+            "retry_interval_minutes": 5,
+            "morning_retry_until": MORNING_RETRY_UNTIL if args.mode == "morning" else "",
+            "evening_retry_until": EVENING_RETRY_UNTIL if args.mode == "evening" else "",
             "command": command,
         },
     )
-    return subprocess.call(command, cwd=ROOT)
+    exit_code = subprocess.call(command, cwd=ROOT)
+    if exit_code == 0:
+        state[run_key] = now.strftime("%Y-%m-%d %H:%M:%S")
+        save_json(RUNNER_STATE_FILE, state)
+        append_action(
+            "自动计划",
+            "完成",
+            "本次计划执行成功，今天不再重试",
+            {"mode": args.mode, "target": target, "run_key": run_key},
+        )
+    else:
+        append_action(
+            "自动计划",
+            "等待重试",
+            "本次计划执行失败，将等待下一次 5 分钟触发",
+            {"mode": args.mode, "target": target, "exit_code": exit_code},
+        )
+    return exit_code
 
 
 if __name__ == "__main__":
