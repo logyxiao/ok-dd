@@ -264,6 +264,7 @@ assets/templates/
 
 ```text
 morning_work_notice.png
+clock_reminder_go_button.png
 morning_clock_button.png
 morning_field_clock_button.png
 morning_success_text.png

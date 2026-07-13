@@ -27,7 +27,13 @@ class ClickStep:
 
 
 DEFAULT_STEPS = [
-    ClickStep("打开打卡入口", 0.650, 0.150, template="work_notice.png"),
+    ClickStep(
+        "打开打卡入口",
+        0.650,
+        0.150,
+        template="work_notice.png",
+        alternate_templates=("clock_reminder_go_button.png",),
+    ),
     ClickStep("点击打卡下班", 0.500, 0.600, template="offwork_button.png"),
     ClickStep("点击外勤打卡下班", 0.500, 0.600, template="field_offwork_button.png"),
     ClickStep(
@@ -45,7 +51,13 @@ CLOCK_STEPS = {
         "name": "上班打卡序列",
         "completed": "上班打卡序列已完成",
         "steps": [
-            ClickStep("打开上班打卡入口", 0.650, 0.150, template="morning_work_notice.png"),
+            ClickStep(
+                "打开上班打卡入口",
+                0.650,
+                0.150,
+                template="morning_work_notice.png",
+                alternate_templates=("clock_reminder_go_button.png",),
+            ),
             ClickStep(
                 "点击打卡上班",
                 0.500,
